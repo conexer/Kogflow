@@ -104,8 +104,10 @@ export async function generateVideo(data: VideoGenerationRequest) {
                 usePersonalQueue: false
             };
 
-            const appId = runningHubWorkflowId || '1961996521397010434';
-            const response = await fetch(`https://www.runninghub.cn/openapi/v2/run/ai-app/${appId}`, {
+            let appId = runningHubWorkflowId || '1961996521397010434';
+            const stableId = '1961996521397010434';
+
+            let response = await fetch(`https://www.runninghub.cn/openapi/v2/run/ai-app/${appId}`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${runningHubApiKey}`,
@@ -113,6 +115,25 @@ export async function generateVideo(data: VideoGenerationRequest) {
                 },
                 body: JSON.stringify(payload)
             });
+
+            let result = await response.json();
+            console.log(`📦 RunningHub response (Attempt with ${appId}):`, result);
+
+            // ✅ Fallback logic: If primary ID fails with errorCode 1 (Unknown) and isn't the stable ID
+            if (result.errorCode === '1' && appId !== stableId) {
+                console.warn(`⚠️ Workflow ${appId} failed with Unknown Error. Falling back to stable ID ${stableId}...`);
+                appId = stableId;
+                response = await fetch(`https://www.runninghub.cn/openapi/v2/run/ai-app/${appId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${runningHubApiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                result = await response.json();
+                console.log(`📦 RunningHub response (Fallback with ${appId}):`, result);
+            }
 
             if (!response.ok) {
                 const text = await response.text();
@@ -122,9 +143,6 @@ export async function generateVideo(data: VideoGenerationRequest) {
                 errors.push({ imageUrl, error: err });
                 continue;
             }
-
-            const result = await response.json();
-            console.log('📦 RunningHub response:', result);
 
             // ✅ Check for errorCode in response (even if HTTP 200)
             if (result.errorCode) {

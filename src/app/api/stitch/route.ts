@@ -74,8 +74,24 @@ export async function POST(req: Request) {
             '-i', listFile,
         ];
 
+        // Prepare video filters
+        const filters: string[] = [];
+
         if (fontPath) {
-            args.push('-vf', `drawtext=fontfile='${fontPath.replace(/\\/g, '/')}':text='Created with KogFlow.app':fontcolor=white:fontsize=36:box=1:boxcolor=black@0.4:boxborderw=10:x=(w-text_w)/2:y=h-text_h-40`);
+            const escapedFontPath = fontPath.replace(/\\/g, '/').replace(/:/g, '\\:');
+
+            // Title Overlay (Top Center)
+            if (title) {
+                filters.push(`drawtext=fontfile='${escapedFontPath}':text='${title}':fontcolor=white:fontsize=48:shadowcolor=black@0.6:shadowx=2:shadowy=2:x=(w-text_w)/2:y=60`);
+            }
+
+            // Subtitle/Branding (Bottom Center)
+            const bottomText = subtitle || 'Created with KogFlow.app';
+            filters.push(`drawtext=fontfile='${escapedFontPath}':text='${bottomText}':fontcolor=white:fontsize=32:box=1:boxcolor=black@0.4:boxborderw=10:x=(w-text_w)/2:y=h-text_h-60`);
+        }
+
+        if (filters.length > 0) {
+            args.push('-vf', filters.join(','));
         }
 
         args.push(
