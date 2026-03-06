@@ -13,7 +13,6 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
 const runningHubApiKey = process.env.RUNNINGHUB_API_KEY;
 
 interface VideoGenerationRequest {
-    imageUrls: string[];
     title: string;
     realtorInfo: {
         name: string;
@@ -23,6 +22,8 @@ interface VideoGenerationRequest {
     userId?: string;
     projectId?: string;
     aspectRatio?: '16:9' | '9:16';
+    status?: string;
+    imageUrls?: string[];
 }
 
 // Map aspect ratio string to WAN 2.2 node 260 select index
@@ -47,16 +48,13 @@ export async function generateVideo(data: VideoGenerationRequest) {
     const MOCK_MODE = false;
 
     if (MOCK_MODE) {
-        console.log('🎬 Mock Video Generation:', {
-            images: data.imageUrls.length,
-            title: data.title,
-        });
         await new Promise(resolve => setTimeout(resolve, 1000));
-        const taskIds = data.imageUrls.map((_, i) => `mock-video-${Date.now()}-${i}`);
+        const imageUrls = data.imageUrls || [];
+        const taskIds = imageUrls.map((_, i) => `mock-video-${Date.now()}-${i}`);
         return {
             success: true,
             taskIds,
-            results: data.imageUrls.map((url, i) => ({
+            results: imageUrls.map((url, i) => ({
                 imageUrl: url,
                 taskId: taskIds[i],
                 error: null
@@ -71,12 +69,15 @@ export async function generateVideo(data: VideoGenerationRequest) {
         const errors: any[] = [];
         const results: { imageUrl: string; taskId: string | null; error: string | null }[] = [];
 
-        const ratioIndex = aspectRatioToIndex(data.aspectRatio);
-        const prompt = 'a very slow camera walk through to around half way into the room, no jolting, no quick movements, linear path, photorealistic, high quality real estate walkthrough';
+        const imageUrls = data.imageUrls || [];
+        if (imageUrls.length === 0) return { error: 'No image URLs provided' };
 
-        for (let i = 0; i < data.imageUrls.length; i++) {
-            const imageUrl = data.imageUrls[i];
-            console.log(`Processing image ${i + 1}/${data.imageUrls.length}: ${imageUrl}`);
+        const ratioIndex = aspectRatioToIndex(data.aspectRatio);
+        const prompt = 'Slow, continuous forward tracking shot at eye-level. Smooth gimbal-stabilized handheld motion gliding linearly deep into the room, slightly passing the midpoint. Constant forward momentum, no cuts, realistic walking perspective.';
+
+        for (let i = 0; i < imageUrls.length; i++) {
+            const imageUrl = imageUrls[i];
+            console.log(`Processing image ${i + 1}/${imageUrls.length}: ${imageUrl}`);
 
             // Delay between requests to avoid rate limiting
             if (i > 0) {
@@ -306,6 +307,99 @@ export async function deleteVideo(videoId: number, videoUrl: string) {
         return { success: true };
     } catch (error: any) {
         console.error('Error deleting video:', error);
+        return { error: error.message };
+    }
+}
+
+// --- Queue Management Actions ---
+
+export async function enqueueVideoAction(data: {
+    userId: string;
+    projectId: string;
+    title: string;
+    imageUrls: string[];
+    realtorInfo: any;
+    aspectRatio: '16:9' | '9:16';
+}) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        // 1. Check queue limit (max 5)
+        const { count, error: countError } = await supabase
+            .from('videos')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', data.userId)
+            .in('status', ['queued', 'processing']);
+
+        if (countError) throw countError;
+        if ((count || 0) >= 5) {
+            return { error: 'Maximum of 5 videos allowed in queue. Please wait for current tasks to finish.' };
+        }
+
+        // 2. Insert as queued
+        const { data: video, error } = await supabase
+            .from('videos')
+            .insert({
+                user_id: data.userId,
+                project_id: data.projectId,
+                video_url: '', // Empty until finished
+                title: data.title,
+                image_count: data.imageUrls.length,
+                status: 'queued',
+                image_urls: data.imageUrls,
+                realtor_info: data.realtorInfo,
+                aspect_ratio: data.aspectRatio,
+                progress: 0
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        return { success: true, videoId: video.id };
+    } catch (error: any) {
+        console.error('Enqueue error:', error);
+        return { error: error.message };
+    }
+}
+
+export async function updateVideoQueueStatus(videoId: number, updates: {
+    status?: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+    progress?: number;
+    video_url?: string;
+    error?: string;
+    task_ids?: string[];
+}) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        const { error } = await supabase
+            .from('videos')
+            .update(updates)
+            .eq('id', videoId);
+
+        if (error) throw error;
+        return { success: true };
+    } catch (error: any) {
+        console.error('Update queue error:', error);
+        return { error: error.message };
+    }
+}
+
+export async function getQueuedVideos(userId: string) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        const { data, error } = await supabase
+            .from('videos')
+            .select('*')
+            .eq('user_id', userId)
+            .in('status', ['queued', 'processing'])
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+        return { success: true, videos: data };
+    } catch (error: any) {
+        console.error('Get queued videos error:', error);
         return { error: error.message };
     }
 }

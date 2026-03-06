@@ -4,7 +4,7 @@ import { useState, ChangeEvent, DragEvent, useEffect } from 'react';
 import { X, Upload, Camera, Trash2, Plus, Sparkles, Monitor, Smartphone, Play, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { generateVideo, checkVideoStatus, saveVideoToProject } from '@/app/actions/video';
+import { generateVideo, checkVideoStatus, saveVideoToProject, enqueueVideoAction } from '@/app/actions/video';
 import { uploadAsset } from '@/app/actions/assets';
 
 interface VideoCreationModalProps {
@@ -121,150 +121,31 @@ export function VideoCreationModal({
         if (!title.trim()) return toast.error('Please enter a video title');
 
         setIsGenerating(true);
-        setGenerationStep('generating_clips');
-        setProgress(5);
-        setStatusMessage('Initializing video generation...');
+        const toastId = toast.loading('Adding video to queue...');
 
         try {
             const imageUrls = selectedImages.map(img => img.url);
 
-            // Initial batch start
-            const initResult = await generateVideo({
-                imageUrls,
-                title: title.trim(),
-                realtorInfo,
+            const result = await enqueueVideoAction({
+                userId,
                 projectId,
+                title: title.trim(),
+                imageUrls,
+                realtorInfo,
                 aspectRatio
             });
 
-            if (initResult.error) throw new Error(initResult.error);
+            if (result.error) throw new Error(result.error);
 
-            // Initialize clip statuses
-            const initialMap = new Map<string, ClipStatus>();
-            imageUrls.forEach((url, i) => {
-                const res = initResult.results?.find((r: any) => r.imageUrl === url);
-                initialMap.set(url, {
-                    imageUrl: url,
-                    taskId: res?.taskId || null,
-                    status: res?.taskId ? 'generating' : 'failed',
-                    error: res?.error || undefined,
-                    retries: 0
-                });
-            });
-            setClipStatuses(initialMap);
-
-            // Polling and Retry Logic
-            await new Promise<void>((resolve, reject) => {
-                const interval = setInterval(async () => {
-                    const currentStatuses = Array.from(initialMap.values());
-                    const pending = currentStatuses.filter(s => s.status === 'generating' || s.status === 'failed' && s.retries < 3);
-
-                    if (pending.length === 0) {
-                        clearInterval(interval);
-                        const successes = Array.from(initialMap.values()).filter(s => s.status === 'success');
-                        if (successes.length === 0) reject(new Error('All clips failed after retries.'));
-                        else resolve();
-                        return;
-                    }
-
-                    for (const clip of pending) {
-                        if (clip.status === 'failed' && clip.retries < 3) {
-                            // Automatically retry
-                            setStatusMessage(`Retrying Clip ${imageUrls.indexOf(clip.imageUrl) + 1} (Attempt ${clip.retries + 1}/3)...`);
-                            const retryRes = await generateVideo({
-                                imageUrls: [clip.imageUrl],
-                                title: title.trim(),
-                                realtorInfo,
-                                projectId,
-                                aspectRatio
-                            });
-
-                            if (retryRes.success && retryRes.results?.[0].taskId) {
-                                clip.taskId = retryRes.results[0].taskId;
-                                clip.status = 'generating';
-                                clip.retries++;
-                                initialMap.set(clip.imageUrl, clip);
-                            } else {
-                                clip.retries++;
-                                initialMap.set(clip.imageUrl, clip);
-                            }
-                        } else if (clip.status === 'generating' && clip.taskId) {
-                            const statusRes = await checkVideoStatus(clip.taskId) as any;
-                            if (statusRes.status === 'success' && statusRes.videoUrl) {
-                                clip.status = 'success';
-                                clip.videoUrl = statusRes.videoUrl;
-                                initialMap.set(clip.imageUrl, clip);
-                            } else if (statusRes.status === 'failed') {
-                                clip.status = 'failed';
-                                clip.error = statusRes.error;
-                                initialMap.set(clip.imageUrl, clip);
-                            }
-                        }
-                    }
-
-                    // Update UI Progress
-                    const total = imageUrls.length;
-                    const doneCount = Array.from(initialMap.values()).filter(s => s.status === 'success').length;
-                    setProgress(10 + Math.round((doneCount / total) * 70));
-                    setStatusMessage(`Generated ${doneCount}/${total} clips...`);
-                    setClipStatuses(new Map(initialMap));
-                }, 5000);
-            });
-
-            // 3. Trigger Stitching
-            setGenerationStep('stitching');
-            setStatusMessage('Stitching clips together...');
-            setProgress(85);
-
-            const completedVideos = selectedImages
-                .map(img => initialMap.get(img.url)?.videoUrl)
-                .filter(Boolean) as string[];
-
-            const stitchResponse = await fetch('/api/stitch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    videoUrls: completedVideos,
-                    title: title,
-                    subtitle: `Contact: ${realtorInfo.name} ${realtorInfo.phone}`,
-                    userId: userId,
-                    projectId: projectId
-                })
-            });
-
-            if (!stitchResponse.ok) {
-                const err = await stitchResponse.json();
-                throw new Error(err.error || 'Stitching failed');
-            }
-
-            const stitchResult = await stitchResponse.json();
-            const finalUrl = stitchResult.videoUrl;
-
-            if (finalUrl) {
-                await saveVideoToProject({
-                    userId,
-                    projectId,
-                    videoUrl: finalUrl,
-                    title,
-                    imageCount: selectedImages.length
-                });
-            }
-
-            setProgress(100);
-            setGenerationStep('completed');
-            setStatusMessage('Video created successfully!');
-            toast.success('Video created successfully!');
-
-            setTimeout(() => {
-                onGenerate(stitchResult);
-                onClose();
-            }, 1000);
-
+            toast.success('Video added to queue! Processing in background.');
+            onGenerate(null); // Just trigger refresh
+            onClose();
         } catch (error: any) {
             console.error(error);
-            toast.error(error.message || 'Failed to generate video');
+            toast.error(error.message || 'Failed to queue video');
             setIsGenerating(false);
-            setGenerationStep('idle');
+        } finally {
+            toast.dismiss(toastId);
         }
     };
 
