@@ -1,0 +1,213 @@
+import { Check, Sofa, Armchair, Sparkles } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Input } from '@/components/ui/input';
+
+export type StagingMode = 'add_furniture' | 'remove_furniture';
+export type StagingStyle = 'scandinavian' | 'minimalist' | 'modern' | 'industrial' | 'coast' | 'boho';
+export type RoomType = 'living_room' | 'bedroom' | 'kitchen' | 'dining_room' | 'bathroom' | 'home_office';
+
+interface StagingControlsProps {
+    mode: StagingMode;
+    setMode: (mode: StagingMode) => void;
+    style: StagingStyle;
+    setStyle: (style: StagingStyle) => void;
+    roomType: RoomType | 'custom';
+    setRoomType: (type: RoomType | 'custom') => void;
+    customRoomType: string;
+    setCustomRoomType: (value: string) => void;
+    customStyle: string;
+    setCustomStyle: (value: string) => void;
+    isGenerating: boolean;
+    onGenerate: () => void;
+    disabled?: boolean;
+}
+
+const ROOM_TYPES: { id: RoomType; label: string }[] = [
+    { id: 'living_room', label: 'Living Room' },
+    { id: 'bedroom', label: 'Bedroom' },
+    { id: 'kitchen', label: 'Kitchen' },
+    { id: 'dining_room', label: 'Dining Room' },
+    { id: 'bathroom', label: 'Bathroom' },
+    { id: 'home_office', label: 'Home Office' },
+];
+
+const STYLES: { id: StagingStyle; label: string; color: string }[] = [
+    { id: 'scandinavian', label: 'Scandinavian', color: 'bg-emerald-500' },
+    { id: 'minimalist', label: 'Minimalist', color: 'bg-slate-500' },
+    { id: 'modern', label: 'Modern', color: 'bg-blue-500' },
+    { id: 'industrial', label: 'Industrial', color: 'bg-orange-500' },
+    { id: 'coast', label: 'Coastal', color: 'bg-cyan-500' },
+    { id: 'boho', label: 'Bohemian', color: 'bg-rose-500' },
+];
+
+export function StagingControls({
+    mode,
+    setMode,
+    style,
+    setStyle,
+    roomType,
+    setRoomType,
+    customRoomType,
+    setCustomRoomType,
+    customStyle,
+    setCustomStyle,
+    isGenerating,
+    onGenerate,
+    disabled
+}: StagingControlsProps) {
+    return (
+        <div className="space-y-6 w-full max-w-md bg-card border border-border/50 rounded-xl p-6 shadow-xl backdrop-blur-xl">
+            {/* Mode Selection */}
+            <div className="space-y-3">
+                <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Transformation Type</label>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-muted/50 rounded-lg">
+                    <button
+                        onClick={() => setMode('add_furniture')}
+                        className={cn(
+                            "flex items-center justify-center gap-2 py-2.5 text-sm font-medium rounded-md transition-all",
+                            mode === 'add_furniture'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:bg-background/50 hover:text-foreground"
+                        )}
+                        disabled={isGenerating}
+                    >
+                        <Sofa className="w-4 h-4" />
+                        Stage Room
+                    </button>
+                    <button
+                        onClick={() => setMode('remove_furniture')}
+                        className={cn(
+                            "flex items-center justify-center gap-2 py-2.5 text-sm font-medium rounded-md transition-all",
+                            mode === 'remove_furniture'
+                                ? "bg-background text-foreground shadow-sm"
+                                : "text-muted-foreground hover:bg-background/50 hover:text-foreground"
+                        )}
+                        disabled={isGenerating}
+                    >
+                        <Armchair className="w-4 h-4" />
+                        Clear Room
+                    </button>
+                </div>
+            </div>
+
+            {/* Room Type Selection */}
+            <div className="space-y-3">
+                <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Room Type</label>
+                <div className="grid grid-cols-2 gap-2">
+                    {ROOM_TYPES.map((r) => (
+                        <button
+                            key={r.id}
+                            onClick={() => setRoomType(r.id)}
+                            disabled={isGenerating}
+                            className={cn(
+                                "group relative flex items-center justify-between px-3 py-3 border rounded-lg text-left transition-all overflow-hidden",
+                                roomType === r.id
+                                    ? "border-primary bg-primary/5 shadow-[0_0_15px_-3px_var(--color-primary)] text-primary font-medium"
+                                    : "border-border hover:border-primary/50 hover:bg-accent/50 text-muted-foreground hover:text-foreground"
+                            )}
+                        >
+                            <span className="z-10 text-sm">{r.label}</span>
+                            {roomType === r.id && <Check className="w-4 h-4 text-primary" />}
+                            <div className="absolute inset-0 opacity-0 group-hover:opacity-5 transition-opacity bg-primary" />
+                        </button>
+                    ))}
+                </div>
+                {/* Custom Room Input */}
+                <div className={cn(
+                    "transition-all duration-200 relative z-10",
+                    roomType === 'custom' ? "opacity-100" : "opacity-80 hover:opacity-100"
+                )}>
+                    <Input
+                        placeholder="Custom Room (e.g. Game Room)"
+                        value={customRoomType}
+                        onFocus={() => setRoomType('custom')}
+                        onChange={(e) => {
+                            setCustomRoomType(e.target.value);
+                            if (roomType !== 'custom') setRoomType('custom');
+                        }}
+                        disabled={isGenerating}
+                        className={cn(
+                            "bg-background/50",
+                            roomType === 'custom' && "border-primary ring-1 ring-primary/20",
+                            "cursor-text" // Ensure cursor shows
+                        )}
+                    />
+                </div>
+            </div>
+
+            {/* Style Selection (Only if adding furniture) */}
+            <div className={cn(
+                "space-y-3 transition-opacity duration-300",
+                mode === 'remove_furniture' ? "opacity-50 pointer-events-none" : "opacity-100"
+            )}>
+                <label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Interior Style</label>
+                <div className="grid grid-cols-2 gap-3">
+                    {STYLES.map((s) => (
+                        <button
+                            key={s.id}
+                            onClick={() => {
+                                setStyle(s.id);
+                                setCustomStyle('');
+                            }}
+                            disabled={isGenerating || mode === 'remove_furniture'}
+                            className={cn(
+                                "group relative flex items-center justify-between px-3 py-3 border rounded-lg text-left transition-all overflow-hidden",
+                                style === s.id && !customStyle
+                                    ? "border-primary bg-primary/5 shadow-[0_0_15px_-3px_var(--color-primary)]"
+                                    : "border-border hover:border-primary/50 hover:bg-accent/50"
+                            )}
+                        >
+                            <span className="z-10 text-sm font-medium">{s.label}</span>
+                            {style === s.id && <Check className="w-4 h-4 text-primary" />}
+                            <div className={cn(
+                                "absolute inset-0 opacity-0 group-hover:opacity-5 transition-opacity",
+                                s.color
+                            )} />
+                        </button>
+                    ))}
+                </div>
+
+                {/* Custom Style Input */}
+                <Input
+                    placeholder="Custom Style (e.g. Mid-century modern)"
+                    value={customStyle}
+                    onFocus={() => {
+                        // Optional: Clear selection? Or just let user type.
+                    }}
+                    onChange={(e) => setCustomStyle(e.target.value)}
+                    disabled={isGenerating || mode === 'remove_furniture'}
+                    className={cn(
+                        "bg-background/50 placeholder:text-muted-foreground/50 relative z-10",
+                        customStyle && "border-primary ring-1 ring-primary/20"
+                    )}
+                />
+            </div>
+
+            {/* Generate Button */}
+            <button
+                onClick={onGenerate}
+                disabled={disabled || isGenerating}
+                className={cn(
+                    "w-full relative overflow-hidden py-4 rounded-lg font-bold text-white shadow-lg transition-all transform active:scale-95 disabled:opacity-70 disabled:cursor-not-allowed",
+                    "bg-gradient-to-r from-violet-600 via-purple-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500"
+                )}
+            >
+                <span className="relative z-10 flex items-center justify-center gap-2">
+                    {isGenerating ? (
+                        <>
+                            <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                            Processing...
+                        </>
+                    ) : (
+                        <>
+                            <Sparkles className="w-5 h-5" />
+                            Generate Renders
+                        </>
+                    )}
+                </span>
+                {/* Shine effect */}
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full hover:animate-[shimmer_1s_infinite]" />
+            </button>
+        </div>
+    );
+}
