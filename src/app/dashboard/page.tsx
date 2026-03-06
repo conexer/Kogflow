@@ -155,6 +155,7 @@ function DashboardContent() {
 
     const [showCreateProjectModal, setShowCreateProjectModal] = useState(false);
     const [hasCheckedProjects, setHasCheckedProjects] = useState(false);
+    const [previewVideoUrl, setPreviewVideoUrl] = useState<string | null>(null);
 
     useEffect(() => {
         async function checkProjects() {
@@ -259,7 +260,12 @@ function DashboardContent() {
                                     <div className="aspect-video relative overflow-hidden">
                                         <video src={vid.video_url} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" muted onMouseOver={(e: any) => e.target.play()} onMouseOut={(e: any) => { e.target.pause(); e.target.currentTime = 0; }} loop />
                                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 gap-4">
-                                            <a href={vid.video_url} target="_blank" rel="noopener noreferrer" className="w-10 h-10 flex items-center justify-center bg-white text-black rounded-full hover:scale-110 transition-transform"><Play className="w-5 h-5 fill-current ml-0.5" /></a>
+                                            <button
+                                                onClick={() => setPreviewVideoUrl(vid.video_url)}
+                                                className="w-10 h-10 flex items-center justify-center bg-white text-black rounded-full hover:scale-110 transition-transform"
+                                            >
+                                                <Play className="w-5 h-5 fill-current ml-0.5" />
+                                            </button>
                                             <button
                                                 onClick={() => {
                                                     const { downloadVideo } = require('@/lib/client-download');
@@ -336,6 +342,26 @@ function DashboardContent() {
                 userId={user?.id || ''}
                 onGenerate={() => projectId && loadAssets(projectId)}
             />
+
+            {/* Video Preview Modal */}
+            {previewVideoUrl && (
+                <div className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-4">
+                    <button
+                        onClick={() => setPreviewVideoUrl(null)}
+                        className="absolute top-6 right-6 p-3 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors z-[110]"
+                    >
+                        <X className="w-8 h-8" />
+                    </button>
+                    <div className="relative w-full max-w-5xl aspect-video rounded-2xl overflow-hidden shadow-2xl border border-white/10">
+                        <video
+                            src={previewVideoUrl}
+                            className="w-full h-full"
+                            controls
+                            autoPlay
+                        />
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
