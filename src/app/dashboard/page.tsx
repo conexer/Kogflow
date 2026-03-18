@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Suspense, useRef } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import {
     Film,
     Image as ImageIcon,
@@ -25,7 +25,7 @@ import { VideoCreationModal } from '@/components/video-creation-modal';
 import { getProjects } from '@/app/actions/projects';
 import { startEditGeneration, checkGenerationStatus } from '@/app/actions/generate';
 import { uploadAsset, getProjectAssets } from '@/app/actions/assets';
-import { generateVideo, checkVideoStatus, deleteVideo, updateVideoQueueStatus, getQueuedVideos } from '@/app/actions/video';
+import { generateVideo, checkVideoStatus, deleteVideo } from '@/app/actions/video';
 import { useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import { downloadImage } from '@/lib/client-download';
@@ -153,13 +153,10 @@ function DashboardContent() {
 
     // (Removed handleVideoGenerate as it is handled within VideoCreationModal)
 
-    const [processingVideosState, setProcessingVideosState] = useState<Set<number>>(new Set());
-    const processingRef = useRef<Set<number>>(new Set());
     const [showCreateProjectModal, setShowCreateProjectModal] = useState(false);
     const [hasCheckedProjects, setHasCheckedProjects] = useState(false);
     const [previewVideoUrl, setPreviewVideoUrl] = useState<string | null>(null);
 
-    // Initial project check
     useEffect(() => {
         async function checkProjects() {
             if (hasCheckedProjects) return;
@@ -215,140 +212,6 @@ function DashboardContent() {
         }
     };
 
-    // Background Queue Manager
-    useEffect(() => {
-        if (!user) return;
-
-        const interval = setInterval(async () => {
-            const { success, videos: queued } = await getQueuedVideos(user.id);
-            if (!success || !queued) return;
-
-            // Update local video list with processing info
-            setVideos(prev => {
-                const map = new Map(prev.map(v => [v.id, v]));
-                queued.forEach(v => map.set(v.id, v));
-                return Array.from(map.values()).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-            });
-
-            for (const video of queued) {
-                if (processingRef.current.has(video.id)) continue;
-
-                // Start processing if queued
-                if (video.status === 'queued' || video.status === 'processing') {
-                    processingRef.current.add(video.id);
-                    setProcessingVideosState(new Set(processingRef.current));
-                    processVideo(video);
-                }
-            }
-        }, 5000);
-
-        return () => clearInterval(interval);
-    }, [user]);
-
-    const processVideo = async (video: any) => {
-        console.log(`🎬 Processing video queue item: ${video.id}`);
-        try {
-            await updateVideoQueueStatus(video.id, { status: 'processing', progress: 5 });
-
-            // 1. Generate Clips or Resume
-            let taskIds = video.task_ids || [];
-            if (taskIds.length === 0) {
-                const res = await generateVideo({
-                    imageUrls: video.image_urls,
-                    title: video.title,
-                    realtorInfo: video.realtor_info,
-                    aspectRatio: video.aspect_ratio,
-                    projectId: video.project_id,
-                    userId: user?.id
-                });
-                if (res.error) throw new Error(res.error);
-                taskIds = res.taskIds || [];
-                await updateVideoQueueStatus(video.id, { task_ids: taskIds, progress: 10 });
-            }
-
-            // 2. Poll for clips
-            const completedClips = new Map<string, string>();
-            const imageUrls = video.image_urls;
-
-            await new Promise<void>((resolve, reject) => {
-                const pollInterval = setInterval(async () => {
-                    // Check if cancelled
-                    const { videos: current } = await getQueuedVideos(user?.id || '');
-                    const currentVideo = current?.find(v => v.id === video.id);
-                    if (!currentVideo || currentVideo.status === 'cancelled') {
-                        clearInterval(pollInterval);
-                        reject(new Error('Cancelled'));
-                        return;
-                    }
-
-                    for (const taskId of taskIds) {
-                        if (Array.from(completedClips.values()).includes(taskId)) continue;
-                        const status = await checkVideoStatus(taskId) as any;
-                        if (status.status === 'success') {
-                            completedClips.set(taskId, status.videoUrl);
-                        } else if (status.status === 'failed') {
-                            clearInterval(pollInterval);
-                            reject(new Error(status.error || 'Clip failed'));
-                            return;
-                        }
-                    }
-
-                    const prog = 10 + Math.round((completedClips.size / taskIds.length) * 70);
-                    await updateVideoQueueStatus(video.id, { progress: prog });
-
-                    if (completedClips.size === taskIds.length) {
-                        clearInterval(pollInterval);
-                        resolve();
-                    }
-                }, 5000);
-            });
-
-            // 3. Stitch
-            await updateVideoQueueStatus(video.id, { progress: 85 });
-            const orderedClips = taskIds.map((tid: string) => completedClips.get(tid));
-
-            const stitchRes = await fetch('/api/stitch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    videoUrls: orderedClips,
-                    title: video.title,
-                    subtitle: `Contact: ${video.realtor_info.name} ${video.realtor_info.phone}`,
-                    userId: user?.id,
-                    projectId: video.project_id
-                })
-            });
-
-            if (!stitchRes.ok) throw new Error('Stitching failed');
-            const { videoUrl: finalUrl } = await stitchRes.json();
-
-            // 4. Complete
-            await updateVideoQueueStatus(video.id, {
-                status: 'completed',
-                progress: 100,
-                video_url: finalUrl
-            });
-            toast.success(`Video "${video.title}" is ready!`);
-            if (projectId) loadAssets(projectId);
-
-        } catch (error: any) {
-            console.error(`Error processing video ${video.id}:`, error);
-            if (error.message !== 'Cancelled') {
-                await updateVideoQueueStatus(video.id, { status: 'failed', error: error.message });
-                toast.error(`Video "${video.title}" failed: ${error.message}`);
-            }
-        } finally {
-            processingRef.current.delete(video.id);
-            setProcessingVideosState(new Set(processingRef.current));
-        }
-    };
-
-    const handleCancelVideo = async (videoId: number) => {
-        if (!confirm('Cancel this video generation?')) return;
-        await updateVideoQueueStatus(videoId, { status: 'cancelled' });
-        toast.info('Video generation cancelled');
-    };
-
     return (
         <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-8">
             <div className="space-y-4">
@@ -394,74 +257,31 @@ function DashboardContent() {
                         ) : (
                             videos.map((vid) => (
                                 <div key={vid.id} className="bg-black/40 rounded-xl overflow-hidden border border-border/50 shadow-2xl group relative">
-                                    {vid.status === 'completed' || !vid.status ? (
-                                        <>
-                                            <div className="aspect-video relative overflow-hidden">
-                                                <video src={vid.video_url} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" muted onMouseOver={(e: any) => e.target.play()} onMouseOut={(e: any) => { e.target.pause(); e.target.currentTime = 0; }} loop />
-                                                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 gap-4">
-                                                    <button
-                                                        onClick={() => setPreviewVideoUrl(vid.video_url)}
-                                                        className="w-10 h-10 flex items-center justify-center bg-white text-black rounded-full hover:scale-110 transition-transform"
-                                                    >
-                                                        <Play className="w-5 h-5 fill-current ml-0.5" />
-                                                    </button>
-                                                    <button
-                                                        onClick={() => {
-                                                            const { downloadVideo } = require('@/lib/client-download');
-                                                            downloadVideo({ url: vid.video_url, filename: `${vid.title || 'video'}.mp4` });
-                                                        }}
-                                                        className="w-10 h-10 flex items-center justify-center bg-primary text-primary-foreground rounded-full hover:scale-110 transition-transform"
-                                                    >
-                                                        <UploadCloud className="w-5 h-5 rotate-180" />
-                                                    </button>
-                                                    <button onClick={() => handleDeleteVideo(vid.id, vid.video_url)} className="w-10 h-10 flex items-center justify-center bg-destructive text-destructive-foreground rounded-full hover:scale-110 transition-transform"><Trash2 className="w-4 h-4" /></button>
-                                                </div>
-                                            </div>
-                                            <div className="p-4 bg-muted/20 border-t border-border/50">
-                                                <h3 className="text-sm font-bold text-white truncate">{vid.title || 'Untitled Video'}</h3>
-                                                <div className="flex items-center justify-between mt-1">
-                                                    <p className="text-[10px] text-muted-foreground">{new Date(vid.created_at).toLocaleDateString()}</p>
-                                                    <span className="text-[10px] bg-green-500/10 text-green-500 px-1.5 py-0.5 rounded font-bold uppercase">Ready</span>
-                                                </div>
-                                            </div>
-                                        </>
-                                    ) : (
-                                        <div className="aspect-video bg-muted/20 flex flex-col items-center justify-center p-6 text-center space-y-4">
-                                            {vid.status === 'failed' ? (
-                                                <>
-                                                    <X className="w-8 h-8 text-destructive" />
-                                                    <div className="space-y-1">
-                                                        <h4 className="text-sm font-bold text-white">Generation Failed</h4>
-                                                        <p className="text-[10px] text-muted-foreground max-w-[180px] line-clamp-2">{vid.error || 'Unknown error occurred'}</p>
-                                                    </div>
-                                                    <button onClick={() => handleDeleteVideo(vid.id, vid.video_url)} className="text-[10px] text-destructive hover:underline font-bold">Dismiss</button>
-                                                </>
-                                            ) : vid.status === 'cancelled' ? (
-                                                <>
-                                                    <X className="w-8 h-8 text-muted-foreground" />
-                                                    <h4 className="text-sm font-bold text-white">Cancelled</h4>
-                                                    <button onClick={() => handleDeleteVideo(vid.id, vid.video_url)} className="text-[10px] text-muted-foreground hover:underline font-bold">Remove</button>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <div className="relative w-16 h-16">
-                                                        <svg className="w-full h-full transform -rotate-90">
-                                                            <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="transparent" className="text-white/5" />
-                                                            <circle cx="32" cy="32" r="28" stroke="currentColor" strokeWidth="4" fill="transparent" strokeDasharray={176} strokeDashoffset={176 - (176 * (vid.progress || 0)) / 100} className="text-primary transition-all duration-500" strokeLinecap="round" />
-                                                        </svg>
-                                                        <div className="absolute inset-0 flex items-center justify-center text-[10px] font-bold text-white">{vid.progress || 0}%</div>
-                                                    </div>
-                                                    <div className="space-y-1">
-                                                        <h4 className="text-sm font-bold text-white animate-pulse">
-                                                            {vid.status === 'queued' ? 'In Queue' : 'Generating...'}
-                                                        </h4>
-                                                        <p className="text-[10px] text-muted-foreground">{vid.title}</p>
-                                                    </div>
-                                                    <button onClick={() => handleCancelVideo(vid.id)} className="text-[xs] px-3 py-1 bg-white/5 hover:bg-white/10 rounded-full text-white/60 hover:text-white transition-colors text-[10px] font-bold">Cancel</button>
-                                                </>
-                                            )}
+                                    <div className="aspect-video relative overflow-hidden">
+                                        <video src={vid.video_url} className="absolute inset-0 w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" muted onMouseOver={(e: any) => e.target.play()} onMouseOut={(e: any) => { e.target.pause(); e.target.currentTime = 0; }} loop />
+                                        <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 gap-4">
+                                            <button
+                                                onClick={() => setPreviewVideoUrl(vid.video_url)}
+                                                className="w-10 h-10 flex items-center justify-center bg-white text-black rounded-full hover:scale-110 transition-transform"
+                                            >
+                                                <Play className="w-5 h-5 fill-current ml-0.5" />
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    const { downloadVideo } = require('@/lib/client-download');
+                                                    downloadVideo({ url: vid.video_url, filename: `${vid.title || 'video'}.mp4` });
+                                                }}
+                                                className="w-10 h-10 flex items-center justify-center bg-primary text-primary-foreground rounded-full hover:scale-110 transition-transform"
+                                            >
+                                                <UploadCloud className="w-5 h-5 rotate-180" />
+                                            </button>
+                                            <button onClick={() => handleDeleteVideo(vid.id, vid.video_url)} className="w-10 h-10 flex items-center justify-center bg-destructive text-destructive-foreground rounded-full hover:scale-110 transition-transform"><Trash2 className="w-4 h-4" /></button>
                                         </div>
-                                    )}
+                                    </div>
+                                    <div className="p-4 bg-muted/20 border-t border-border/50">
+                                        <h3 className="text-sm font-bold text-white truncate">{vid.title || 'Untitled Video'}</h3>
+                                        <p className="text-[10px] text-muted-foreground">{new Date(vid.created_at).toLocaleDateString()}</p>
+                                    </div>
                                 </div>
                             ))
                         )}

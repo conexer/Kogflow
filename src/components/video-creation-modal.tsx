@@ -4,7 +4,7 @@ import { useState, ChangeEvent, DragEvent, useEffect } from 'react';
 import { X, Upload, Camera, Trash2, Plus, Sparkles, Monitor, Smartphone, Play, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { generateVideo, checkVideoStatus, saveVideoToProject, enqueueVideoAction } from '@/app/actions/video';
+import { generateVideo, checkVideoStatus, saveVideoToProject } from '@/app/actions/video';
 import { uploadAsset } from '@/app/actions/assets';
 
 interface VideoCreationModalProps {
@@ -121,37 +121,156 @@ export function VideoCreationModal({
         if (!title.trim()) return toast.error('Please enter a video title');
 
         setIsGenerating(true);
-        const toastId = toast.loading('Adding video to queue...');
+        setGenerationStep('generating_clips');
+        setProgress(5);
+        setStatusMessage('Initializing video generation...');
 
         try {
             const imageUrls = selectedImages.map(img => img.url);
 
-            const result = await enqueueVideoAction({
-                userId,
-                projectId,
-                title: title.trim(),
+            // Initial batch start
+            const initResult = await generateVideo({
                 imageUrls,
+                title: title.trim(),
                 realtorInfo,
+                projectId,
                 aspectRatio
             });
 
-            if (result.error) throw new Error(result.error);
+            if (initResult.error) throw new Error(initResult.error);
 
-            toast.success('Video added to queue! Processing in background.');
-            onGenerate(null); // Just trigger refresh
-            onClose();
+            // Initialize clip statuses
+            const initialMap = new Map<string, ClipStatus>();
+            imageUrls.forEach((url, i) => {
+                const res = initResult.results?.find((r: any) => r.imageUrl === url);
+                initialMap.set(url, {
+                    imageUrl: url,
+                    taskId: res?.taskId || null,
+                    status: res?.taskId ? 'generating' : 'failed',
+                    error: res?.error || undefined,
+                    retries: 0
+                });
+            });
+            setClipStatuses(initialMap);
+
+            // Polling and Retry Logic
+            await new Promise<void>((resolve, reject) => {
+                const interval = setInterval(async () => {
+                    const currentStatuses = Array.from(initialMap.values());
+                    const pending = currentStatuses.filter(s => s.status === 'generating' || s.status === 'failed' && s.retries < 3);
+
+                    if (pending.length === 0) {
+                        clearInterval(interval);
+                        const successes = Array.from(initialMap.values()).filter(s => s.status === 'success');
+                        if (successes.length === 0) reject(new Error('All clips failed after retries.'));
+                        else resolve();
+                        return;
+                    }
+
+                    for (const clip of pending) {
+                        if (clip.status === 'failed' && clip.retries < 3) {
+                            // Automatically retry
+                            setStatusMessage(`Retrying Clip ${imageUrls.indexOf(clip.imageUrl) + 1} (Attempt ${clip.retries + 1}/3)...`);
+                            const retryRes = await generateVideo({
+                                imageUrls: [clip.imageUrl],
+                                title: title.trim(),
+                                realtorInfo,
+                                projectId,
+                                aspectRatio
+                            });
+
+                            if (retryRes.success && retryRes.results?.[0].taskId) {
+                                clip.taskId = retryRes.results[0].taskId;
+                                clip.status = 'generating';
+                                clip.retries++;
+                                initialMap.set(clip.imageUrl, clip);
+                            } else {
+                                clip.retries++;
+                                initialMap.set(clip.imageUrl, clip);
+                            }
+                        } else if (clip.status === 'generating' && clip.taskId) {
+                            const statusRes = await checkVideoStatus(clip.taskId) as any;
+                            if (statusRes.status === 'success' && statusRes.videoUrl) {
+                                clip.status = 'success';
+                                clip.videoUrl = statusRes.videoUrl;
+                                initialMap.set(clip.imageUrl, clip);
+                            } else if (statusRes.status === 'failed') {
+                                clip.status = 'failed';
+                                clip.error = statusRes.error;
+                                initialMap.set(clip.imageUrl, clip);
+                            }
+                        }
+                    }
+
+                    // Update UI Progress
+                    const total = imageUrls.length;
+                    const doneCount = Array.from(initialMap.values()).filter(s => s.status === 'success').length;
+                    setProgress(10 + Math.round((doneCount / total) * 70));
+                    setStatusMessage(`Generated ${doneCount}/${total} clips...`);
+                    setClipStatuses(new Map(initialMap));
+                }, 5000);
+            });
+
+            // 3. Trigger Stitching
+            setGenerationStep('stitching');
+            setStatusMessage('Stitching clips together...');
+            setProgress(85);
+
+            const completedVideos = selectedImages
+                .map(img => initialMap.get(img.url)?.videoUrl)
+                .filter(Boolean) as string[];
+
+            const stitchResponse = await fetch('/api/stitch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    videoUrls: completedVideos,
+                    title: title,
+                    subtitle: `Contact: ${realtorInfo.name} ${realtorInfo.phone}`,
+                    userId: userId,
+                    projectId: projectId
+                })
+            });
+
+            if (!stitchResponse.ok) {
+                const err = await stitchResponse.json();
+                throw new Error(err.error || 'Stitching failed');
+            }
+
+            const stitchResult = await stitchResponse.json();
+            const finalUrl = stitchResult.videoUrl;
+
+            if (finalUrl) {
+                await saveVideoToProject({
+                    userId,
+                    projectId,
+                    videoUrl: finalUrl,
+                    title,
+                    imageCount: selectedImages.length
+                });
+            }
+
+            setProgress(100);
+            setGenerationStep('completed');
+            setStatusMessage('Video created successfully!');
+            toast.success('Video created successfully!');
+
+            setTimeout(() => {
+                onGenerate(stitchResult);
+                onClose();
+            }, 1000);
+
         } catch (error: any) {
             console.error(error);
-            toast.error(error.message || 'Failed to queue video');
+            toast.error(error.message || 'Failed to generate video');
             setIsGenerating(false);
-        } finally {
-            toast.dismiss(toastId);
+            setGenerationStep('idle');
         }
     };
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-6 bg-background/80 backdrop-blur-md overflow-y-auto">
-            <div className="relative w-full max-w-6xl bg-card border border-border rounded-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row max-h-[90vh]">
+        <div className="fixed inset-0 z-50 flex items-start justify-center p-4 md:p-6 bg-background/80 backdrop-blur-md overflow-y-auto mt-4 md:mt-0">
+            <div className="relative w-full max-w-6xl bg-card border border-border rounded-3xl shadow-2xl overflow-hidden flex flex-col md:flex-row md:max-h-[90vh]">
                 <button
                     onClick={onClose}
                     className="absolute top-6 right-6 p-2 rounded-full hover:bg-muted transition-colors z-10"
@@ -160,10 +279,10 @@ export function VideoCreationModal({
                 </button>
 
                 {/* Left Side: Preview area or Progress */}
-                <div className="md:w-1/2 bg-black flex items-center justify-center aspect-video md:aspect-auto">
+                <div className={`md:w-1/2 bg-black flex items-center justify-center ${isGenerating ? 'py-8 md:py-0' : 'aspect-video md:aspect-auto'}`}>
                     {isGenerating ? (
-                        <div className="text-center space-y-8 p-12 w-full max-w-md">
-                            <div className="relative w-32 h-32 mx-auto">
+                        <div className="text-center space-y-4 md:space-y-8 p-6 md:p-12 w-full max-w-md">
+                            <div className="relative w-24 h-24 md:w-32 md:h-32 mx-auto">
                                 <svg className="w-full h-full transform -rotate-90">
                                     <circle
                                         cx="64" cy="64" r="60"
