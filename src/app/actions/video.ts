@@ -3,8 +3,9 @@
 import { createClient } from '@supabase/supabase-js';
 
 // --- Constants ---
-// App ID for WAN 2.2 Image to Video (free tier)
+// App IDs for WAN 2.2 Image to Video
 const WAN22_APP_ID = '2034018763611316225';
+const SECONDARY_WAN22_APP_ID = '2034388379109957633';
 // runninghub.ai is currently the stable domain for our WAN 2.2 App ID
 const RUNNINGHUB_BASE = 'https://www.runninghub.ai';
 
@@ -72,7 +73,7 @@ export async function generateVideo(data: VideoGenerationRequest) {
         const results: { imageUrl: string; taskId: string | null; error: string | null }[] = [];
 
         const ratioIndex = aspectRatioToIndex(data.aspectRatio);
-        const prompt = 'a very slow camera walk through to around half way into the room, no jolting, no quick movements, linear path, photorealistic, high quality real estate walkthrough';
+        const prompt = 'Have the camera slowly glide straight into the room.';
 
         for (let i = 0; i < data.imageUrls.length; i++) {
             const imageUrl = data.imageUrls[i];
@@ -84,87 +85,76 @@ export async function generateVideo(data: VideoGenerationRequest) {
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
 
-            const payload = {
-                nodeInfoList: [
-                    {
-                        nodeId: '135',
-                        fieldName: 'image',
-                        fieldValue: imageUrl,
-                        description: 'Upload image'
-                    },
-                    {
-                        nodeId: '260',
-                        fieldName: 'select',
-                        fieldValue: ratioIndex,
-                        description: 'Aspect ratio'
-                    },
-                    {
-                        nodeId: '139',
-                        fieldName: 'index',
-                        fieldValue: '1',
-                        description: 'Prompt input method'
-                    },
-                    {
-                        nodeId: '116',
-                        fieldName: 'text',
-                        fieldValue: prompt,
-                        description: 'Creative description'
-                    }
-                ],
-                instanceType: 'default',
-                usePersonalQueue: 'false'
-            };
+            const appIds = [WAN22_APP_ID, SECONDARY_WAN22_APP_ID];
+            let imageSuccess = false;
 
-            const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/run/ai-app/${WAN22_APP_ID}`, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${runningHubApiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(payload)
-            });
-
-            let result: any;
-            try {
-                result = await response.json();
-            } catch {
-                const text = await response.text();
-                console.error(`❌ Non-JSON response for image ${imageUrl}:`, text);
-                results.push({ imageUrl, taskId: null, error: `Parse error: ${text.slice(0, 200)}` });
-                errors.push({ imageUrl, error: 'Non-JSON response' });
-                continue;
-            }
-
-            console.log(`📦 WAN 2.2 response (image ${i + 1}):`, result);
-
-            if (!response.ok) {
-                const err = `HTTP ${response.status}: ${result?.message || result?.errorMessage || 'Unknown'}`;
-                console.error(`❌ HTTP Error for image ${imageUrl}:`, err);
-                results.push({ imageUrl, taskId: null, error: err });
-                errors.push({ imageUrl, error: err });
-                continue;
-            }
-
-            // Check for API-level error codes
-            if (result.errorCode && result.errorCode !== '0') {
-                const errorMsg = result.errorMessage || 'Unknown API error';
-                console.error(`❌ API Error ${result.errorCode}:`, errorMsg);
-
-                if (result.errorCode === '421' || result.errorCode === 421) {
-                    throw new Error('RunningHub rate limit reached. Please wait a few minutes and try again.');
+            for (let j = 0; j < appIds.length; j++) {
+                const currentAppId = appIds[j];
+                const isRetry = j > 0;
+                
+                if (isRetry) {
+                    console.log(`🔄 Retrying with secondary App ID: ${currentAppId}`);
                 }
 
-                results.push({ imageUrl, taskId: result.taskId || null, error: errorMsg });
-                errors.push({ imageUrl, error: errorMsg });
-                continue;
-            }
+                const payload = {
+                    nodeInfoList: [
+                        { nodeId: '135', fieldName: 'image', fieldValue: imageUrl, description: 'Upload image' },
+                        { nodeId: '260', fieldName: 'select', fieldValue: ratioIndex, description: 'Aspect ratio' },
+                        { nodeId: '139', fieldName: 'index', fieldValue: '1', description: 'Prompt input method' },
+                        { nodeId: '116', fieldName: 'text', fieldValue: prompt, description: 'Creative description' }
+                    ],
+                    instanceType: 'default',
+                    usePersonalQueue: 'false'
+                };
 
-            if (result.taskId) {
-                results.push({ imageUrl, taskId: result.taskId, error: null });
-                taskIds.push(result.taskId);
-            } else {
-                results.push({ imageUrl, taskId: null, error: 'No taskId returned' });
-                errors.push({ imageUrl, error: 'No taskId returned' });
+                const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/run/ai-app/${currentAppId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${runningHubApiKey}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+
+                let result: any;
+                try {
+                    result = await response.json();
+                } catch {
+                    const text = await response.text();
+                    console.error(`❌ Non-JSON response for image ${imageUrl} (App ${currentAppId}):`, text);
+                    if (!isRetry) continue; // Try fallback
+                    results.push({ imageUrl, taskId: null, error: `Parse error: ${text.slice(0, 200)}` });
+                    errors.push({ imageUrl, error: 'Non-JSON response' });
+                    break;
+                }
+
+                console.log(`📦 WAN 2.2 response (image ${i + 1}, App ${j === 0 ? 'Primary' : 'Secondary'}):`, result);
+
+                if (!response.ok || (result.errorCode && result.errorCode !== '0')) {
+                    const errorMsg = result.errorMessage || result.message || 'Unknown API error';
+                    console.error(`❌ Error ${result.errorCode || response.status} for image ${imageUrl} (App ${currentAppId}):`, errorMsg);
+                    
+                    if (!isRetry) {
+                        console.log('⚠️ Primary App failed, attempting fallback...');
+                        continue; // Try secondary App
+                    }
+
+                    results.push({ imageUrl, taskId: result.taskId || null, error: errorMsg });
+                    errors.push({ imageUrl, error: errorMsg });
+                    break;
+                }
+
+                if (result.taskId) {
+                    results.push({ imageUrl, taskId: result.taskId, error: null });
+                    taskIds.push(result.taskId);
+                    imageSuccess = true;
+                    break; // Success!
+                } else {
+                    if (!isRetry) continue;
+                    results.push({ imageUrl, taskId: null, error: 'No taskId returned' });
+                    errors.push({ imageUrl, error: 'No taskId returned' });
+                    break;
+                }
             }
         }
 
