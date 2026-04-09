@@ -3,14 +3,17 @@
 import { createClient } from '@supabase/supabase-js';
 
 // --- Constants ---
-// App ID for WAN 2.2 Image to Video (free tier)
-const WAN22_APP_ID = '1959889002553880577';
-// runninghub.ai returns 401 with Bearer token; .cn OpenAPI accepts our key
-const RUNNINGHUB_BASE = 'https://www.runninghub.cn';
+const ATLASCLOUD_BASE = 'https://api.atlascloud.ai';
+const ATLASCLOUD_MODEL = 'bytedance/seedance-v1-pro-fast/image-to-video';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const runningHubApiKey = process.env.RUNNINGHUB_API_KEY;
+const atlasApiKey = process.env.ATLASCLOUD_API_KEY;
+
+// Defaults
+const DEFAULT_RESOLUTION = '480p';
+const DEFAULT_DURATION = 4;
+const DEFAULT_ASPECT_RATIO = '16:9';
 
 interface VideoGenerationRequest {
     title: string;
@@ -26,100 +29,80 @@ interface VideoGenerationRequest {
     imageUrls?: string[];
 }
 
-// Map aspect ratio string to WAN 2.2 node 260 select index
-// Values per official API docs: 1=Auto, 2=1:1, 3=4:3, 4=3:4, 5=16:9, 6=9:16
-function aspectRatioToIndex(ratio: '16:9' | '9:16' | undefined): string {
-    switch (ratio) {
-        case '16:9': return '5';
-        case '9:16': return '6';
-        default: return '1'; // Auto match
-    }
+const PROMPT = 'Slow, continuous forward tracking shot at eye-level. Smooth gimbal-stabilized handheld motion gliding linearly deep into the room, slightly passing the midpoint. Constant forward momentum, no cuts, realistic walking perspective.';
+
+async function uploadImageToAtlas(sourceUrl: string): Promise<string> {
+    const imgRes = await fetch(sourceUrl);
+    if (!imgRes.ok) throw new Error(`Failed to fetch source image: ${imgRes.status}`);
+    const imgBuffer = await imgRes.arrayBuffer();
+    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+    const ext = contentType.includes('png') ? 'png' : 'jpg';
+
+    const form = new FormData();
+    form.append('file', new Blob([imgBuffer], { type: contentType }), `image.${ext}`);
+
+    const uploadRes = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/uploadMedia`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${atlasApiKey}` },
+        body: form
+    });
+    const uploadJson = await uploadRes.json();
+    const atlasUrl = uploadJson?.data?.download_url;
+    if (!atlasUrl) throw new Error(`AtlasCloud upload failed: ${JSON.stringify(uploadJson)}`);
+    return atlasUrl;
 }
 
 export async function generateVideo(data: VideoGenerationRequest) {
     console.log('🚀 generateVideo() called with:', data);
 
-    if (!runningHubApiKey) {
-        console.error('❌ Missing RunningHub API key!');
-        return { error: 'RunningHub API key not configured' };
+    if (!atlasApiKey) {
+        console.error('❌ Missing AtlasCloud API key!');
+        return { error: 'AtlasCloud API key not configured' };
     }
 
-    // Set to true to use mock api, false for real api
-    const MOCK_MODE = false;
-
-    if (MOCK_MODE) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const imageUrls = data.imageUrls || [];
-        const taskIds = imageUrls.map((_, i) => `mock-video-${Date.now()}-${i}`);
-        return {
-            success: true,
-            taskIds,
-            results: imageUrls.map((url, i) => ({
-                imageUrl: url,
-                taskId: taskIds[i],
-                error: null
-            })),
-            isMock: true
-        };
-    }
+    const imageUrls = data.imageUrls || [];
+    if (imageUrls.length === 0) return { error: 'No image URLs provided' };
 
     try {
-        console.log('🎬 Starting WAN 2.2 Image-to-Video batch on RunningHub.ai...');
+        console.log('🎬 Starting Seedance v1 Pro Fast batch on AtlasCloud...');
         const taskIds: string[] = [];
         const errors: any[] = [];
         const results: { imageUrl: string; taskId: string | null; error: string | null }[] = [];
-
-        const imageUrls = data.imageUrls || [];
-        if (imageUrls.length === 0) return { error: 'No image URLs provided' };
-
-        const ratioIndex = aspectRatioToIndex(data.aspectRatio);
-        const prompt = 'Slow, continuous forward tracking shot at eye-level. Smooth gimbal-stabilized handheld motion gliding linearly deep into the room, slightly passing the midpoint. Constant forward momentum, no cuts, realistic walking perspective.';
 
         for (let i = 0; i < imageUrls.length; i++) {
             const imageUrl = imageUrls[i];
             console.log(`Processing image ${i + 1}/${imageUrls.length}: ${imageUrl}`);
 
-            // Delay between requests to avoid rate limiting
             if (i > 0) {
                 console.log('⏳ Waiting 2 seconds before next request...');
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
 
+            // Upload image to AtlasCloud storage first (required by their API)
+            let atlasImageUrl: string;
+            try {
+                atlasImageUrl = await uploadImageToAtlas(imageUrl);
+                console.log(`📤 Uploaded to AtlasCloud: ${atlasImageUrl}`);
+            } catch (uploadErr: any) {
+                console.error(`❌ Upload failed for ${imageUrl}:`, uploadErr.message);
+                results.push({ imageUrl, taskId: null, error: `Upload failed: ${uploadErr.message}` });
+                errors.push({ imageUrl, error: uploadErr.message });
+                continue;
+            }
+
             const payload = {
-                nodeInfoList: [
-                    {
-                        nodeId: '135',
-                        fieldName: 'image',
-                        fieldValue: imageUrl,
-                        description: 'Upload image'
-                    },
-                    {
-                        nodeId: '260',
-                        fieldName: 'select',
-                        fieldValue: ratioIndex,
-                        description: 'Aspect ratio'
-                    },
-                    {
-                        nodeId: '139',
-                        fieldName: 'index',
-                        fieldValue: '1',
-                        description: 'Prompt input method'
-                    },
-                    {
-                        nodeId: '116',
-                        fieldName: 'text',
-                        fieldValue: prompt,
-                        description: 'Creative description'
-                    }
-                ],
-                instanceType: 'default',
-                usePersonalQueue: 'false'
+                model: ATLASCLOUD_MODEL,
+                image: atlasImageUrl,
+                prompt: PROMPT,
+                duration: DEFAULT_DURATION,
+                resolution: DEFAULT_RESOLUTION,
+                aspect_ratio: data.aspectRatio || DEFAULT_ASPECT_RATIO
             };
 
-            const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/run/ai-app/${WAN22_APP_ID}`, {
+            const response = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/generateVideo`, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${runningHubApiKey}`,
+                    'Authorization': `Bearer ${atlasApiKey}`,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify(payload)
@@ -136,36 +119,24 @@ export async function generateVideo(data: VideoGenerationRequest) {
                 continue;
             }
 
-            console.log(`📦 WAN 2.2 response (image ${i + 1}):`, result);
+            console.log(`📦 AtlasCloud response (image ${i + 1}):`, result);
 
             if (!response.ok) {
-                const err = `HTTP ${response.status}: ${result?.message || result?.errorMessage || 'Unknown'}`;
+                const err = `HTTP ${response.status}: ${result?.error || result?.message || 'Unknown'}`;
                 console.error(`❌ HTTP Error for image ${imageUrl}:`, err);
                 results.push({ imageUrl, taskId: null, error: err });
                 errors.push({ imageUrl, error: err });
                 continue;
             }
 
-            // Check for API-level error codes
-            if (result.errorCode && result.errorCode !== '0') {
-                const errorMsg = result.errorMessage || 'Unknown API error';
-                console.error(`❌ API Error ${result.errorCode}:`, errorMsg);
-
-                if (result.errorCode === '421' || result.errorCode === 421) {
-                    throw new Error('RunningHub rate limit reached. Please wait a few minutes and try again.');
-                }
-
-                results.push({ imageUrl, taskId: result.taskId || null, error: errorMsg });
-                errors.push({ imageUrl, error: errorMsg });
-                continue;
-            }
-
-            if (result.taskId) {
-                results.push({ imageUrl, taskId: result.taskId, error: null });
-                taskIds.push(result.taskId);
+            const predictionId = result?.data?.id;
+            if (predictionId) {
+                results.push({ imageUrl, taskId: predictionId, error: null });
+                taskIds.push(predictionId);
             } else {
-                results.push({ imageUrl, taskId: null, error: 'No taskId returned' });
-                errors.push({ imageUrl, error: 'No taskId returned' });
+                const errMsg = result?.error || result?.message || 'No prediction ID returned';
+                results.push({ imageUrl, taskId: null, error: errMsg });
+                errors.push({ imageUrl, error: errMsg });
             }
         }
 
@@ -184,29 +155,17 @@ export async function generateVideo(data: VideoGenerationRequest) {
 }
 
 export async function checkVideoStatus(taskId: string) {
-    if (!runningHubApiKey) {
+    if (!atlasApiKey) {
         return { error: 'API key not configured' };
     }
 
-    // Mock status
-    if (taskId.startsWith('mock-video-')) {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        return {
-            status: 'success',
-            videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-            message: 'Mock video ready'
-        };
-    }
-
     try {
-        // WAN 2.2 polling: POST /openapi/v2/query on runninghub.ai
-        const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/query`, {
-            method: 'POST',
+        const response = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/prediction/${taskId}`, {
+            method: 'GET',
             headers: {
-                'Authorization': `Bearer ${runningHubApiKey}`,
+                'Authorization': `Bearer ${atlasApiKey}`,
                 'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ taskId })
+            }
         });
 
         if (!response.ok) {
@@ -224,15 +183,12 @@ export async function checkVideoStatus(taskId: string) {
 }
 
 function parseStatusResult(result: any) {
-    const status = result.status;
-    const errorCode = result.errorCode;
+    const data = result?.data || result;
+    const status = data?.status;
 
-    if (status === 'SUCCESS' && result.results && result.results.length > 0) {
-        const results = result.results;
-        // WAN 2.2 returns results with fieldName='video_url' and the file at fileUrl
-        const videoResult = results.find((r: any) => r.fieldName === 'video_url') || results[0];
-        const videoUrl = videoResult?.fileUrl || videoResult?.url;
-
+    if (status === 'completed' || status === 'succeeded') {
+        const outputs = data?.outputs;
+        const videoUrl = Array.isArray(outputs) ? outputs[0] : outputs;
         return {
             status: 'success',
             videoUrl,
@@ -240,11 +196,10 @@ function parseStatusResult(result: any) {
         };
     }
 
-    if (status === 'FAILED' || (errorCode && errorCode !== '0')) {
+    if (status === 'failed') {
         return {
             status: 'failed',
-            error: result.errorMessage || result.failedReason?.exception_message || 'Generation failed',
-            errorCode: errorCode
+            error: data?.error || 'Generation failed'
         };
     }
 
@@ -324,7 +279,6 @@ export async function enqueueVideoAction(data: {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     try {
-        // 1. Check queue limit (max 5)
         const { count, error: countError } = await supabase
             .from('videos')
             .select('id', { count: 'exact', head: true })
@@ -336,13 +290,12 @@ export async function enqueueVideoAction(data: {
             return { error: 'Maximum of 5 videos allowed in queue. Please wait for current tasks to finish.' };
         }
 
-        // 2. Insert as queued
         const { data: video, error } = await supabase
             .from('videos')
             .insert({
                 user_id: data.userId,
                 project_id: data.projectId,
-                video_url: '', // Empty until finished
+                video_url: '',
                 title: data.title,
                 image_count: data.imageUrls.length,
                 status: 'queued',
