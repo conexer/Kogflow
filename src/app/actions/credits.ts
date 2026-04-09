@@ -22,9 +22,7 @@ export async function getGuestCredits() {
     return 5;
 }
 
-// Credit costs — $5 = 100 credits, 1 credit = $0.05
-export const CREDIT_COST_IMAGE = 10;       // $0.50 per image
-export const CREDIT_COST_VIDEO_IMAGE = 10; // $0.50 per image in video
+import { CREDIT_COST_IMAGE } from '@/lib/credit-costs';
 
 export async function checkCredits(userId: string, required = CREDIT_COST_IMAGE) {
     const supabase = createClient(supabaseUrl, supabaseKey);

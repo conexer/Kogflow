@@ -1,7 +1,8 @@
 'use server';
 
 import { createClient } from '@supabase/supabase-js';
-import { CREDIT_COST_VIDEO_IMAGE, deductCredit } from './credits';
+import { deductCredit } from './credits';
+import { CREDIT_COST_VIDEO_IMAGE } from '@/lib/credit-costs';
 
 // --- Constants ---
 const ATLASCLOUD_BASE = 'https://api.atlascloud.ai';
