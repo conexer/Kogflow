@@ -54,7 +54,7 @@ export function Navbar() {
                         </button>
                         <div className="absolute left-0 top-full mt-1 w-64 rounded-xl border border-border bg-card shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 overflow-hidden">
                             <div className="p-2 space-y-1">
-                                <Link href="/1-click-product-video" className="flex items-start gap-3 p-3 hover:bg-muted rounded-lg transition-colors group/item">
+                                <Link href="/dashboard?tab=videos" className="flex items-start gap-3 p-3 hover:bg-muted rounded-lg transition-colors group/item">
                                     <div className="mt-1 w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center text-violet-500 group-hover/item:bg-violet-500 group-hover/item:text-white transition-colors">
                                         <Video className="w-4 h-4" />
                                     </div>
@@ -63,13 +63,13 @@ export function Navbar() {
                                         <div className="text-xs text-muted-foreground">Turn photos into viral videos</div>
                                     </div>
                                 </Link>
-                                <Link href="/" className="flex items-start gap-3 p-3 hover:bg-muted rounded-lg transition-colors group/item">
+                                <Link href="/dashboard" className="flex items-start gap-3 p-3 hover:bg-muted rounded-lg transition-colors group/item">
                                     <div className="mt-1 w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-500 group-hover/item:bg-blue-500 group-hover/item:text-white transition-colors">
                                         <LayoutTemplate className="w-4 h-4" />
                                     </div>
                                     <div>
                                         <div className="font-semibold text-sm">Virtual Staging</div>
-                                        <div className="text-xs text-muted-foreground">AIC-powered interior design</div>
+                                        <div className="text-xs text-muted-foreground">AI-powered interior design</div>
                                     </div>
                                 </Link>
                             </div>
@@ -150,7 +150,7 @@ export function Navbar() {
                             {isProductsOpen && (
                                 <div className="pl-4 space-y-1">
                                     <Link
-                                        href="/1-click-product-video"
+                                        href="/dashboard?tab=videos"
                                         onClick={() => setIsMenuOpen(false)}
                                         className="flex items-center gap-3 p-2 text-sm hover:bg-muted/50 rounded-md text-muted-foreground"
                                     >
@@ -158,7 +158,7 @@ export function Navbar() {
                                         1-Click Product Video
                                     </Link>
                                     <Link
-                                        href="/"
+                                        href="/dashboard"
                                         onClick={() => setIsMenuOpen(false)}
                                         className="flex items-center gap-3 p-2 text-sm hover:bg-muted/50 rounded-md text-muted-foreground"
                                     >

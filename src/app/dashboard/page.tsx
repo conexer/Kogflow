@@ -48,7 +48,12 @@ function DashboardContent() {
         }
     }, [user, authLoading, router]);
 
-    const [activeTab, setActiveTab] = useState<'videos' | 'images' | 'captions'>('images');
+    const tabParam = searchParams.get('tab') as 'videos' | 'images' | 'captions' | null;
+    const [activeTab, setActiveTab] = useState<'videos' | 'images' | 'captions'>(tabParam || 'images');
+
+    useEffect(() => {
+        if (tabParam) setActiveTab(tabParam);
+    }, [tabParam]);
     const [uploadedImages, setUploadedImages] = useState<string[]>([]); // URLs only for display
     const [assets, setAssets] = useState<any[]>([]); // Full asset objects
     const [videos, setVideos] = useState<any[]>([]); // Stitched videos
