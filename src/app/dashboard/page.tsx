@@ -91,10 +91,15 @@ function DashboardContent() {
             return;
         }
 
-        const allImages = [
-            ...assets.filter((a: any) => a.type === 'image').map((a: any) => a.url),
-            ...generations.map((g: any) => g.result_url)
-        ];
+        // Combine assets + generations, deduplicate by URL
+        const seen = new Set<string>();
+        const allImages: string[] = [];
+        for (const a of assets.filter((a: any) => a.type === 'image')) {
+            if (!seen.has(a.url)) { seen.add(a.url); allImages.push(a.url); }
+        }
+        for (const g of generations) {
+            if (g.result_url && !seen.has(g.result_url)) { seen.add(g.result_url); allImages.push(g.result_url); }
+        }
         setUploadedImages(allImages);
         setAssets(assets);
         setVideos(videos || []);

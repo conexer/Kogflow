@@ -419,41 +419,28 @@ export async function checkGenerationStatus(taskId: string, metadata: any) {
                     }
 
                     // 5. Deduct credits & Save to DB
-                    // Check for duplicate to avoid double-charging on re-poll
-                    const { data: existing } = await supabase
-                        .from('generations')
-                        .select('id')
-                        .eq('result_url', resultUrl) // Check against the NEW url if possible, but we just made it. 
-                        // Actually better to check if we already processed this TaskID? 
-                        // The current DB schema links by Result URL maybe? 
-                        // Let's stick to the previous logic but careful about re-runs.
-                        // Ideally we check by some request ID, but for now checking 'result_url' is tricky if we change it.
-                        // Let's check by 'original_url' AND 'created_at' recent?
-                        // Or just simplistic: Deduct.
-                        .single();
-
-                    // Better duplicate check: Check if User has a generation created in last 10 seconds with same original URL? 
-                    // Or relies on client polling stopping.
-                    // Let's trust the logic for now, but optimize later.
-
-                    if (userId) { // Deduct for logged in
+                    if (userId) {
                         await deductCredit(userId);
-                    } else {
-                        // Guest credits handled via cookie in startGeneration? 
-                        // Yes, we deducted optimistically there.
-                    }
 
-                    // Save to DB
-                    if (userId) { // Only save to DB if logged in? Or save for guests too if we tracked them?
-                        // Schema requires user_id usually.
                         await supabase.from('generations').insert({
                             user_id: userId,
                             original_url: originalUrl,
-                            result_url: resultUrl, // SAVING THE WATERMARKED URL
+                            result_url: resultUrl,
                             mode: mode,
                             style: mode === 'add_furniture' ? style : null,
-                            project_id: projectId // Save Project ID
+                            project_id: projectId || null
                         });
+
+                        // Save to assets table so it appears in project image grid
+                        if (projectId) {
+                            await supabase.from('assets').insert({
+                                user_id: userId,
+                                project_id: projectId,
+                                url: resultUrl,
+                                type: 'image',
+                                filename: `ai-staged-${Date.now()}.jpg`
+                            });
+                        }
                     }
                 }
 
