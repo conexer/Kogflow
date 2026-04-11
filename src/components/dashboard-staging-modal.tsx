@@ -389,7 +389,7 @@ export function DashboardStagingModal({ isOpen, onClose, imageUrl, onGenerate, i
                     {/* Footer - Main Button */}
                     <div className="p-4 md:p-6 border-t border-border bg-background sticky bottom-0 md:relative z-10">
                         <button
-                            onClick={() => onGenerate({ mode, roomType, style: selectedStyle, customPrompt, resolution, editOption })}
+                            onClick={() => onGenerate({ mode, roomType, style: selectedStyle, customStyle: customFurnitureStyle, customPrompt, resolution, editOption })}
                             disabled={isGenerating}
                             className="w-auto mx-auto px-12 md:w-full md:mx-0 md:px-0 py-3.5 bg-teal-500 hover:bg-teal-600 text-white font-bold rounded-xl shadow-lg hover:shadow-xl transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
                         >

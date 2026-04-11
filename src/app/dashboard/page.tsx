@@ -199,9 +199,13 @@ function DashboardContent() {
             if (selectedImage && fileMap.has(selectedImage)) {
                 formData.append('imageFile', fileMap.get(selectedImage)!);
             }
+            const effectiveStyle = (data.style === 'custom' && data.customStyle)
+                ? data.customStyle
+                : data.style;
+
             let finalPrompt = data.mode === 'photo_edit' ?
                 (data.editOption === 'remove_furniture' ? "Empty room, structural integrity preserved" : "Tidy up, photorealistic") :
-                `Transform to ${data.style} style ${data.roomType}`;
+                `Transform to ${effectiveStyle} style ${data.roomType}`;
 
             formData.append('prompt', finalPrompt);
             if (user) formData.append('userId', user.id);
