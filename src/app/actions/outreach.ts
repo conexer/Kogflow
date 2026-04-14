@@ -35,7 +35,7 @@ export interface ScrapedListing {
 // 1. ICP SCORING
 // ─────────────────────────────────────────────
 
-export function scoreICP(listing: Partial<ScrapedListing>): number {
+export async function scoreICP(listing: Partial<ScrapedListing>): Promise<number> {
     let score = 0;
     const kw = listing.keywords?.join(' ').toLowerCase() || '';
 
@@ -104,7 +104,7 @@ export async function scrapeMovotoCity(city: string, maxListings: number = 10): 
                 listingUrl: searchUrl,
                 keywords: [],
             };
-            listing.score = scoreICP(listing);
+            listing.score = await scoreICP(listing);
             listings.push(listing);
         }
 
@@ -418,7 +418,7 @@ export async function runPipelineSession(config: {
 
         for (const listing of listings) {
             // Score the lead
-            listing.score = scoreICP(listing);
+            listing.score = await scoreICP(listing);
             if (listing.score < 5) continue; // Skip low-value leads
 
             // Detect empty rooms using Moondream
