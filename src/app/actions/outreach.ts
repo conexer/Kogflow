@@ -10,6 +10,10 @@ const MOONDREAM_API_KEY = process.env.MOONDREAM_API_KEY!;
 const CAPMONSTER_API_KEY = process.env.CAPMONSTER_API_KEY!;
 const KIE_API_KEY = process.env.KIE_AI_API_KEY!;
 
+const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID!;
+const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET!;
+const GMAIL_REFRESH_TOKEN = process.env.GMAIL_REFRESH_TOKEN!;
+
 // ─────────────────────────────────────────────
 // TYPES
 // ─────────────────────────────────────────────
@@ -400,7 +404,87 @@ export async function checkStagingResult(taskId: string): Promise<{ status: stri
 }
 
 // ─────────────────────────────────────────────
-// 7. PIPELINE RUNNER — Orchestrates everything
+// 7. GMAIL — Send outreach email
+// ─────────────────────────────────────────────
+
+async function getGmailAccessToken(): Promise<string> {
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+            client_id: GMAIL_CLIENT_ID,
+            client_secret: GMAIL_CLIENT_SECRET,
+            refresh_token: GMAIL_REFRESH_TOKEN,
+            grant_type: 'refresh_token',
+        }),
+    });
+    const data = await res.json();
+    if (!data.access_token) throw new Error(`Token refresh failed: ${JSON.stringify(data)}`);
+    return data.access_token;
+}
+
+export async function sendOutreachEmail(lead: {
+    agentName: string;
+    agentEmail: string;
+    address: string;
+    stagedImageUrl?: string;
+}): Promise<{ success?: boolean; error?: string }> {
+    if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET || !GMAIL_REFRESH_TOKEN) {
+        return { error: 'Gmail OAuth credentials not configured' };
+    }
+    if (!lead.agentEmail) return { error: 'No agent email' };
+
+    try {
+        const accessToken = await getGmailAccessToken();
+
+        const subject = `Your listing at ${lead.address} — free virtual staging sample inside`;
+        const body = `Hi ${lead.agentName || 'there'},
+
+I noticed your listing at ${lead.address} and wanted to reach out.
+
+${lead.stagedImageUrl ? `I took the liberty of virtually staging one of your empty rooms — you can see it here:\n${lead.stagedImageUrl}\n\n` : ''}Virtual staging typically helps homes sell faster and for more. We do it in about 15 seconds at Kogflow.com — no design skills needed.
+
+Would love to show you what it could do for this listing. Happy to send a few free samples if you're curious.
+
+Best,
+Kogflow
+https://kogflow.com`;
+
+        // Encode as RFC 2822 message
+        const message = [
+            `From: Kogflow <kogflow.media@gmail.com>`,
+            `To: ${lead.agentEmail}`,
+            `Subject: ${subject}`,
+            `Content-Type: text/plain; charset=utf-8`,
+            ``,
+            body,
+        ].join('\r\n');
+
+        const encoded = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+        const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ raw: encoded }),
+        });
+
+        if (!sendRes.ok) {
+            const err = await sendRes.text();
+            return { error: `Gmail send error ${sendRes.status}: ${err}` };
+        }
+
+        return { success: true };
+
+    } catch (error: any) {
+        return { error: error.message };
+    }
+}
+
+// ─────────────────────────────────────────────
+// 8. PIPELINE RUNNER — Orchestrates everything
 // ─────────────────────────────────────────────
 
 export async function runPipelineSession(config: {
@@ -453,4 +537,69 @@ export async function runPipelineSession(config: {
     }
 
     return { processed, errors };
+}
+
+// ─────────────────────────────────────────────
+// 9. PIPELINE CONFIG — Persist & load settings
+// ─────────────────────────────────────────────
+
+export interface PipelineConfig {
+    sessions_per_day: number;
+    scrapes_per_session: number;
+    cities: string[];
+}
+
+export async function savePipelineConfig(config: PipelineConfig): Promise<{ success?: boolean; error?: string }> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const { error } = await supabase
+        .from('pipeline_config')
+        .upsert({ id: 1, ...config, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    if (error) return { error: error.message };
+    return { success: true };
+}
+
+export async function loadPipelineConfig(): Promise<{ config?: PipelineConfig; error?: string }> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const { data, error } = await supabase
+        .from('pipeline_config')
+        .select('*')
+        .eq('id', 1)
+        .single();
+    if (error || !data) return { config: { sessions_per_day: 3, scrapes_per_session: 10, cities: ['Santa Ana', 'Garden Grove', 'Anaheim'] } };
+    return { config: { sessions_per_day: data.sessions_per_day, scrapes_per_session: data.scrapes_per_session, cities: data.cities } };
+}
+
+// ─────────────────────────────────────────────
+// 10. PIPELINE RUNS — Log cron executions
+// ─────────────────────────────────────────────
+
+export async function logPipelineRun(result: { processed: number; errors: string[] }): Promise<void> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    await supabase.from('pipeline_runs').insert({
+        ran_at: new Date().toISOString(),
+        processed: result.processed,
+        errors: result.errors,
+    });
+}
+
+export async function countTodayRuns(): Promise<number> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const { count } = await supabase
+        .from('pipeline_runs')
+        .select('*', { count: 'exact', head: true })
+        .gte('ran_at', todayStart.toISOString());
+    return count ?? 0;
+}
+
+export async function getRecentRuns(limit = 20): Promise<{ runs?: any[]; error?: string }> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const { data, error } = await supabase
+        .from('pipeline_runs')
+        .select('*')
+        .order('ran_at', { ascending: false })
+        .limit(limit);
+    if (error) return { error: error.message };
+    return { runs: data || [] };
 }

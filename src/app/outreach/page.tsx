@@ -10,7 +10,7 @@ import {
     ChevronRight, ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { getLeadStats, getLeads, runPipelineSession, detectRoom, scrapeMovotoCity } from '@/app/actions/outreach';
+import { getLeadStats, getLeads, runPipelineSession, detectRoom, sendOutreachEmail, updateLeadStatus, savePipelineConfig, loadPipelineConfig, getRecentRuns } from '@/app/actions/outreach';
 import { toast } from 'sonner';
 
 const ALLOWED_EMAILS = ['conexer@gmail.com', 'rocsolid01@gmail.com'];
@@ -41,6 +41,8 @@ const CITIES = [
 ];
 
 const SETUP_SQL = `-- Run this in Supabase SQL Editor
+
+-- Leads table
 CREATE TABLE IF NOT EXISTS public.outreach_leads (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -64,13 +66,36 @@ CREATE TABLE IF NOT EXISTS public.outreach_leads (
   notes TEXT
 );
 
--- Index for fast score-ordered queries
 CREATE INDEX IF NOT EXISTS idx_outreach_leads_score ON public.outreach_leads (icp_score DESC);
 CREATE INDEX IF NOT EXISTS idx_outreach_leads_status ON public.outreach_leads (status);
 
--- Enable RLS but allow service role full access
 ALTER TABLE public.outreach_leads ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Service role full access" ON public.outreach_leads
+  USING (TRUE) WITH CHECK (TRUE);
+
+-- Pipeline config (single row, id = 1)
+CREATE TABLE IF NOT EXISTS public.pipeline_config (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  sessions_per_day INTEGER NOT NULL DEFAULT 3,
+  scrapes_per_session INTEGER NOT NULL DEFAULT 10,
+  cities TEXT[] NOT NULL DEFAULT ARRAY['Santa Ana','Garden Grove','Anaheim'],
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE public.pipeline_config ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON public.pipeline_config
+  USING (TRUE) WITH CHECK (TRUE);
+
+-- Pipeline run log (one row per cron execution)
+CREATE TABLE IF NOT EXISTS public.pipeline_runs (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  ran_at TIMESTAMPTZ DEFAULT NOW(),
+  processed INTEGER NOT NULL DEFAULT 0,
+  errors TEXT[] NOT NULL DEFAULT '{}'
+);
+
+ALTER TABLE public.pipeline_runs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Service role full access" ON public.pipeline_runs
   USING (TRUE) WITH CHECK (TRUE);`;
 
 export default function OutreachPage() {
@@ -92,6 +117,10 @@ export default function OutreachPage() {
     const [runningSession, setRunningSession] = useState(false);
     const [activeTab, setActiveTab] = useState<'dashboard' | 'leads' | 'config' | 'email' | 'setup'>('dashboard');
 
+    // Config save state
+    const [savingConfig, setSavingConfig] = useState(false);
+    const [recentRuns, setRecentRuns] = useState<any[]>([]);
+
     // Test tools
     const [testImageUrl, setTestImageUrl] = useState('');
     const [testResult, setTestResult] = useState<any>(null);
@@ -108,7 +137,9 @@ export default function OutreachPage() {
     const loadData = useCallback(async () => {
         setLoadingData(true);
         try {
-            const [statsRes, leadsRes] = await Promise.all([getLeadStats(), getLeads()]);
+            const [statsRes, leadsRes, configRes, runsRes] = await Promise.all([
+                getLeadStats(), getLeads(), loadPipelineConfig(), getRecentRuns(),
+            ]);
             if ('error' in statsRes && statsRes.error?.includes('outreach_leads')) {
                 setDbReady(false);
                 setActiveTab('setup');
@@ -116,6 +147,12 @@ export default function OutreachPage() {
                 setDbReady(true);
                 if (statsRes.stats) setStats(statsRes.stats);
                 if (leadsRes.leads) setLeads(leadsRes.leads);
+                if (configRes.config) {
+                    setSessionsPerDay(configRes.config.sessions_per_day);
+                    setScrapesPerSession(configRes.config.scrapes_per_session);
+                    setSelectedCities(configRes.config.cities);
+                }
+                if (runsRes.runs) setRecentRuns(runsRes.runs);
             }
         } catch {
             setDbReady(false);
@@ -142,6 +179,42 @@ export default function OutreachPage() {
             toast.error(e.message || 'Session failed');
         }
         setRunningSession(false);
+    };
+
+    const handleSaveConfig = async () => {
+        setSavingConfig(true);
+        const result = await savePipelineConfig({
+            sessions_per_day: sessionsPerDay,
+            scrapes_per_session: scrapesPerSession,
+            cities: selectedCities,
+        });
+        setSavingConfig(false);
+        if (result.error) toast.error(`Save failed: ${result.error}`);
+        else toast.success('Config saved — cron will use these settings');
+    };
+
+    const handleSendEmail = async (lead: any) => {
+        if (!lead.agent_email) { toast.error('No email on file for this lead'); return; }
+        toast.loading(`Sending to ${lead.agent_email}...`, { id: `send-${lead.id}` });
+        try {
+            const result = await sendOutreachEmail({
+                agentName: lead.agent_name || '',
+                agentEmail: lead.agent_email,
+                address: lead.address,
+                stagedImageUrl: lead.staged_image_url || undefined,
+            });
+            toast.dismiss(`send-${lead.id}`);
+            if (result.error) {
+                toast.error(`Send failed: ${result.error}`);
+            } else {
+                toast.success(`Email sent to ${lead.agent_email}`);
+                await updateLeadStatus(lead.id, 'emailed', { contacted_at: new Date().toISOString() });
+                await loadData();
+            }
+        } catch (e: any) {
+            toast.dismiss(`send-${lead.id}`);
+            toast.error(e.message || 'Send failed');
+        }
     };
 
     const handleTestMoondream = async () => {
@@ -333,6 +406,15 @@ export default function OutreachPage() {
                                         <span className={cn("px-2 py-1 rounded-full text-xs font-medium shrink-0", STATUS_COLORS[lead.status] || STATUS_COLORS.scraped)}>
                                             {STATUS_LABELS[lead.status] || lead.status}
                                         </span>
+                                        {lead.agent_email && lead.status !== 'emailed' && (
+                                            <button
+                                                onClick={() => handleSendEmail(lead)}
+                                                className="p-1.5 hover:bg-green-500/10 text-muted-foreground hover:text-green-400 rounded transition-colors shrink-0"
+                                                title={`Send to ${lead.agent_email}`}
+                                            >
+                                                <Send className="w-4 h-4" />
+                                            </button>
+                                        )}
                                         <a href={lead.listing_url} target="_blank" rel="noopener noreferrer" className="p-1.5 hover:bg-muted rounded transition-colors shrink-0">
                                             <ExternalLink className="w-4 h-4 text-muted-foreground" />
                                         </a>
@@ -346,18 +428,40 @@ export default function OutreachPage() {
                 {/* ── CONFIG TAB ── */}
                 {activeTab === 'config' && (
                     <div className="space-y-6 max-w-2xl">
-                        <h2 className="font-bold text-lg flex items-center gap-2"><Settings className="w-5 h-5" /> Pipeline Configuration</h2>
+                        <div className="flex items-center justify-between">
+                            <h2 className="font-bold text-lg flex items-center gap-2"><Settings className="w-5 h-5" /> Pipeline Configuration</h2>
+                            <button
+                                onClick={handleSaveConfig}
+                                disabled={savingConfig}
+                                className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+                            >
+                                {savingConfig ? <><div className="w-3.5 h-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" /> Saving...</> : <><CheckCircle className="w-3.5 h-3.5" /> Save Config</>}
+                            </button>
+                        </div>
 
                         <div className="bg-card border border-border rounded-xl p-6 space-y-5">
-                            <h3 className="font-semibold flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> Schedule & Throttling</h3>
+                            <div className="flex items-start justify-between">
+                                <h3 className="font-semibold flex items-center gap-2"><Clock className="w-4 h-4 text-primary" /> Schedule & Throttling</h3>
+                                <div className="text-xs text-muted-foreground bg-muted/50 px-2 py-1 rounded-lg">
+                                    Cron fires daily at 9 AM · runs all sessions in sequence
+                                </div>
+                            </div>
                             <div className="space-y-4">
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium flex items-center justify-between">Sessions per day <span className="text-primary font-bold">{sessionsPerDay}</span></label>
-                                    <input type="range" min={1} max={10} value={sessionsPerDay} onChange={e => setSessionsPerDay(Number(e.target.value))} className="w-full accent-primary" />
+                                    <label className="text-sm font-medium flex items-center justify-between">
+                                        Sessions per day
+                                        <span className="text-primary font-bold">{sessionsPerDay} <span className="text-muted-foreground font-normal text-xs">≈ every {Math.round(24 / sessionsPerDay)}h</span></span>
+                                    </label>
+                                    <input type="range" min={1} max={6} value={sessionsPerDay} onChange={e => setSessionsPerDay(Number(e.target.value))} className="w-full accent-primary" />
+                                    <div className="flex justify-between text-xs text-muted-foreground"><span>1/day</span><span>6/day (max, cron interval)</span></div>
                                 </div>
                                 <div className="space-y-2">
-                                    <label className="text-sm font-medium flex items-center justify-between">Scrapes per session <span className="text-primary font-bold">{scrapesPerSession}</span></label>
+                                    <label className="text-sm font-medium flex items-center justify-between">
+                                        Scrapes per session
+                                        <span className="text-primary font-bold">{scrapesPerSession} listings</span>
+                                    </label>
                                     <input type="range" min={5} max={50} step={5} value={scrapesPerSession} onChange={e => setScrapesPerSession(Number(e.target.value))} className="w-full accent-primary" />
+                                    <p className="text-xs text-muted-foreground">Zyte handles proxy/anti-bot — spacing between scrapes doesn't affect ban risk. This controls cost per session.</p>
                                 </div>
                             </div>
                         </div>
@@ -397,6 +501,26 @@ export default function OutreachPage() {
                                 ))}
                             </div>
                         </div>
+
+                        {/* Recent Cron Runs */}
+                        <div className="bg-card border border-border rounded-xl p-6 space-y-4">
+                            <h3 className="font-semibold flex items-center gap-2"><BarChart2 className="w-4 h-4 text-primary" /> Recent Cron Runs</h3>
+                            {recentRuns.length === 0 ? (
+                                <p className="text-sm text-muted-foreground">No runs yet. Save config and wait for the cron, or click "Run Session" manually.</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {recentRuns.map((run, i) => (
+                                        <div key={i} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg text-sm">
+                                            <span className="text-muted-foreground font-mono text-xs">{new Date(run.ran_at).toLocaleString()}</span>
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-green-400 font-medium">{run.processed} processed</span>
+                                                {run.errors?.length > 0 && <span className="text-destructive text-xs">{run.errors.length} errors</span>}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
 
@@ -406,9 +530,9 @@ export default function OutreachPage() {
                         <h2 className="font-bold text-lg flex items-center gap-2"><Send className="w-5 h-5" /> Email Outreach</h2>
                         <div className="bg-card border border-border rounded-xl p-6 space-y-4">
                             <h3 className="font-semibold">Sender — kogflow.media@gmail.com</h3>
-                            <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-400 flex items-start gap-2">
-                                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                                Gmail API connection coming next. Will send from kogflow.media@gmail.com with OAuth2.
+                            <div className="p-3 bg-green-500/10 border border-green-500/20 rounded-lg text-sm text-green-400 flex items-start gap-2">
+                                <CheckCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                                Gmail API connected via OAuth2. Sending from kogflow.media@gmail.com.
                             </div>
                         </div>
                         <div className="bg-card border border-border rounded-xl p-6 space-y-4">
@@ -437,9 +561,14 @@ export default function OutreachPage() {
                                         <div className="flex-1 min-w-0">
                                             <div className="text-sm font-medium truncate">{lead.address}</div>
                                             <div className="text-xs text-muted-foreground">{lead.agent_name || 'Agent unknown'} · Score {lead.icp_score}</div>
+                                            {lead.agent_email && <div className="text-xs text-muted-foreground font-mono mt-0.5">{lead.agent_email}</div>}
                                         </div>
-                                        <button className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90">
-                                            Send
+                                        <button
+                                            onClick={() => handleSendEmail(lead)}
+                                            disabled={!lead.agent_email}
+                                            className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded-lg font-medium hover:bg-primary/90 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                        >
+                                            <Send className="w-3 h-3" /> Send
                                         </button>
                                     </div>
                                 ))
@@ -491,7 +620,7 @@ export default function OutreachPage() {
                                     { name: 'Moondream (Vision)', env: 'MOONDREAM_API_KEY', status: true },
                                     { name: 'CapMonster (CAPTCHA)', env: 'CAPMONSTER_API_KEY', status: true },
                                     { name: 'Kie.ai (Staging)', env: 'KIE_AI_API_KEY', status: true },
-                                    { name: 'Gmail API', env: 'GMAIL_CLIENT_ID', status: false },
+                                    { name: 'Gmail API', env: 'GMAIL_CLIENT_ID', status: true },
                                 ].map(key => (
                                     <div key={key.name} className="flex items-center justify-between p-3 bg-muted/30 rounded-lg">
                                         <div>
