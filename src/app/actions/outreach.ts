@@ -862,7 +862,8 @@ export async function loadPipelineConfig(): Promise<{ config?: PipelineConfig; e
         .select('*')
         .eq('id', 1)
         .single();
-    if (error || !data) return { config: { sessions_per_day: 3, scrapes_per_session: 10, cities: ['Phoenix', 'Dallas', 'Atlanta', 'Charlotte', 'Nashville', 'Tampa', 'Las Vegas', 'Houston', 'Denver', 'Orlando'] } };
+    // HAR.com covers Houston metro area + Texas cities — defaults target these reliably
+    if (error || !data) return { config: { sessions_per_day: 3, scrapes_per_session: 10, cities: ['Houston', 'Katy', 'Sugar Land', 'Spring', 'Pearland', 'The Woodlands', 'Cypress', 'Pasadena', 'Humble', 'Friendswood'] } };
     return { config: { sessions_per_day: data.sessions_per_day, scrapes_per_session: data.scrapes_per_session, cities: data.cities } };
 }
 

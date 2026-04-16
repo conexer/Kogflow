@@ -10,7 +10,7 @@ import {
     ChevronRight, ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { getLeadStats, getLeads, runPipelineSession, detectRoom, sendOutreachEmail, updateLeadStatus, savePipelineConfig, loadPipelineConfig, getRecentRuns } from '@/app/actions/outreach';
+import { getLeadStats, getLeads, runPipelineSession, detectRoom, sendOutreachEmail, updateLeadStatus, savePipelineConfig, loadPipelineConfig, getRecentRuns, testAllSites, type SiteTestResult } from '@/app/actions/outreach';
 import { toast } from 'sonner';
 
 const ALLOWED_EMAILS = ['conexer@gmail.com', 'rocsolid01@gmail.com'];
@@ -33,11 +33,11 @@ const STATUS_LABELS: Record<string, string> = {
     emailed: 'Emailed',
 };
 
+// All cities below are searchable via HAR.com (Texas MLS) — pipeline confirmed working for these
 const CITIES = [
-    { region: 'Orange County (Local)', cities: ['Santa Ana', 'Garden Grove', 'Anaheim'] },
-    { region: 'Texas', cities: ['Austin', 'Dallas-Fort Worth'] },
-    { region: 'Florida', cities: ['Tampa', 'Miami'] },
-    { region: 'National', cities: ['Charlotte', 'Raleigh-Durham', 'Atlanta', 'Phoenix'] },
+    { region: 'Houston Metro', cities: ['Houston', 'Katy', 'Sugar Land', 'Spring', 'Pearland', 'The Woodlands', 'Cypress', 'Pasadena'] },
+    { region: 'Houston Suburbs', cities: ['Humble', 'Friendswood', 'League City', 'Baytown', 'Conroe', 'Tomball', 'Richmond', 'Rosenberg'] },
+    { region: 'Texas Other', cities: ['Austin', 'San Antonio', 'Dallas', 'Fort Worth', 'El Paso', 'Arlington', 'Plano', 'Lubbock'] },
 ];
 
 const SETUP_SQL = `-- Run this in Supabase SQL Editor
@@ -112,7 +112,7 @@ export default function OutreachPage() {
     // Pipeline config
     const [sessionsPerDay, setSessionsPerDay] = useState(3);
     const [scrapesPerSession, setScrapesPerSession] = useState(10);
-    const [selectedCities, setSelectedCities] = useState<string[]>(['Santa Ana', 'Garden Grove', 'Anaheim']);
+    const [selectedCities, setSelectedCities] = useState<string[]>(['Houston', 'Katy', 'Sugar Land', 'Spring', 'Pearland', 'The Woodlands', 'Cypress', 'Pasadena', 'Humble', 'Friendswood']);
     const [pipelineRunning, setPipelineRunning] = useState(false);
     const [runningSession, setRunningSession] = useState(false);
     const [activeTab, setActiveTab] = useState<'dashboard' | 'leads' | 'config' | 'email' | 'setup'>('dashboard');
@@ -120,6 +120,11 @@ export default function OutreachPage() {
     // Config save state
     const [savingConfig, setSavingConfig] = useState(false);
     const [recentRuns, setRecentRuns] = useState<any[]>([]);
+    const [lastDebug, setLastDebug] = useState<string[]>([]);
+
+    // Site tester
+    const [siteResults, setSiteResults] = useState<SiteTestResult[]>([]);
+    const [testingsSites, setTestingSites] = useState(false);
 
     // Test tools
     const [testImageUrl, setTestImageUrl] = useState('');
@@ -167,12 +172,15 @@ export default function OutreachPage() {
     const handleRunSession = async () => {
         if (selectedCities.length === 0) { toast.error('Select at least one city'); return; }
         setRunningSession(true);
+        setLastDebug([]);
         toast.loading('Running pipeline session...', { id: 'pipeline' });
         try {
-            const result = await runPipelineSession({ cities: selectedCities, scrapesPerSession });
+            const result = await runPipelineSession({ cities: selectedCities, scrapesPerSession, minLeads: 1 });
             toast.dismiss('pipeline');
-            toast.success(`Session complete: ${result.processed} leads processed`);
-            if (result.errors.length > 0) toast.error(`${result.errors.length} errors: ${result.errors[0]}`);
+            if (result.processed > 0) toast.success(`Session complete: ${result.processed} leads saved`);
+            else toast.error('0 leads found — check debug log below');
+            if (result.errors.length > 0) toast.error(`${result.errors[0]}`);
+            setLastDebug(result.debug || []);
             await loadData();
         } catch (e: any) {
             toast.dismiss('pipeline');
@@ -191,6 +199,24 @@ export default function OutreachPage() {
         setSavingConfig(false);
         if (result.error) toast.error(`Save failed: ${result.error}`);
         else toast.success('Config saved — cron will use these settings');
+    };
+
+    const handleTestSites = async () => {
+        setTestingSites(true);
+        setSiteResults([]);
+        toast.loading('Testing all 3 sites with Zyte...', { id: 'sitetest' });
+        try {
+            const results = await testAllSites();
+            setSiteResults(results);
+            toast.dismiss('sitetest');
+            const okCount = results.filter(r => r.status === 'ok').length;
+            if (okCount > 0) toast.success(`${okCount}/3 sites returned full HTML`);
+            else toast.error('All sites blocked or empty');
+        } catch (e: any) {
+            toast.dismiss('sitetest');
+            toast.error(e.message || 'Test failed');
+        }
+        setTestingSites(false);
     };
 
     const handleSendEmail = async (lead: any) => {
@@ -342,6 +368,70 @@ export default function OutreachPage() {
                                     </div>
                                 ))}
                             </div>
+                        </div>
+
+                        {/* Session Debug Log */}
+                        {lastDebug.length > 0 && (
+                            <div className="bg-card border border-border rounded-xl p-6 space-y-3">
+                                <h2 className="font-bold text-lg flex items-center gap-2"><Terminal className="w-5 h-5 text-primary" /> Last Session Log</h2>
+                                <div className="bg-muted/50 rounded-lg p-4 font-mono text-xs space-y-1 max-h-64 overflow-y-auto">
+                                    {lastDebug.map((line, i) => (
+                                        <div key={i} className={line.includes('✓') ? 'text-green-400' : line.includes('error') || line.includes('0 listings') ? 'text-destructive' : 'text-muted-foreground'}>
+                                            {line}
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Site Tester */}
+                        <div className="bg-card border border-border rounded-xl p-6 space-y-4">
+                            <div className="flex items-center justify-between">
+                                <h2 className="font-bold text-lg flex items-center gap-2"><Zap className="w-5 h-5 text-primary" /> Site Scrape Tester</h2>
+                                <button
+                                    onClick={handleTestSites}
+                                    disabled={testingsSites}
+                                    className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-medium hover:bg-primary/90 disabled:opacity-50"
+                                >
+                                    {testingsSites ? <><div className="w-3.5 h-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" /> Testing...</> : <><Play className="w-3.5 h-3.5" /> Test All 3 Sites</>}
+                                </button>
+                            </div>
+                            <p className="text-sm text-muted-foreground">Tests homes.com, HomePath, and HAR.com against Zyte to see which sites return full listing data.</p>
+
+                            {siteResults.length > 0 && (
+                                <div className="space-y-3">
+                                    {siteResults.map((r) => (
+                                        <div key={r.site} className={cn("rounded-xl border p-4 space-y-3", r.status === 'ok' ? 'border-green-500/30 bg-green-500/5' : r.status === 'blocked' ? 'border-red-500/30 bg-red-500/5' : 'border-border bg-muted/20')}>
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex items-center gap-2">
+                                                    <span className={cn("w-2 h-2 rounded-full", r.status === 'ok' ? 'bg-green-500' : r.status === 'blocked' ? 'bg-red-500' : 'bg-amber-500')} />
+                                                    <span className="font-semibold text-sm">{r.site}</span>
+                                                    <span className={cn("text-xs px-2 py-0.5 rounded-full font-medium", r.status === 'ok' ? 'bg-green-500/20 text-green-400' : r.status === 'blocked' ? 'bg-red-500/20 text-red-400' : 'bg-amber-500/20 text-amber-400')}>
+                                                        {r.status === 'ok' ? '✓ Full HTML' : r.status === 'blocked' ? '✗ Blocked/Empty' : '✗ Error'}
+                                                    </span>
+                                                </div>
+                                                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                                                    <span>{(r.htmlLength / 1024).toFixed(0)}KB</span>
+                                                    {r.nextDataFound && <span className="text-blue-400">__NEXT_DATA__ ✓</span>}
+                                                    {r.jsonLdFound && <span className="text-violet-400">JSON-LD ✓</span>}
+                                                    <span>{r.addressesFound} addresses</span>
+                                                    <span>{r.photosFound} photos</span>
+                                                </div>
+                                            </div>
+                                            {r.sampleAddresses.length > 0 && (
+                                                <div className="text-xs text-green-400 font-mono space-y-0.5">
+                                                    {r.sampleAddresses.map((a, i) => <div key={i}>• {a}</div>)}
+                                                </div>
+                                            )}
+                                            {r.error && <div className="text-xs text-destructive font-mono">{r.error}</div>}
+                                            <details className="text-xs">
+                                                <summary className="text-muted-foreground cursor-pointer hover:text-foreground">View HTML snippet</summary>
+                                                <pre className="mt-2 bg-muted/50 rounded-lg p-3 overflow-x-auto whitespace-pre-wrap text-muted-foreground max-h-48 overflow-y-auto">{r.snippet}</pre>
+                                            </details>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         {/* Moondream Test Tool */}
