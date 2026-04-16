@@ -100,12 +100,12 @@ const CITY_COORDS: Record<string, { latitude: number; longitude: number }> = {
     'Orlando': { latitude: 28.5383, longitude: -81.3792 },
 };
 
-async function zyteGet(url: string, city?: string): Promise<{ html?: string; error?: string }> {
-    const coords = city ? CITY_COORDS[city] : undefined;
-
+async function zyteGet(url: string, _city?: string): Promise<{ html?: string; error?: string }> {
     const payload: Record<string, any> = {
         url,
         browserHtml: true,
+        // Route Zyte proxy through US — country code string, not lat/lng
+        geolocation: 'US',
         // Realistic browser headers reduce bot-detection signals
         customHttpRequestHeaders: [
             { name: 'Accept-Language', value: 'en-US,en;q=0.9' },
@@ -114,11 +114,6 @@ async function zyteGet(url: string, city?: string): Promise<{ html?: string; err
             { name: 'Pragma', value: 'no-cache' },
         ],
     };
-
-    // Spoof GPS to match target city — causes sites to serve city-specific content
-    if (coords) {
-        payload.geolocation = { ...coords, accuracy: 150 };
-    }
 
     const res = await fetch('https://api.zyte.com/v1/extract', {
         method: 'POST',
