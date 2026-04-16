@@ -53,16 +53,151 @@ export async function scoreICP(listing: Partial<ScrapedListing>): Promise<number
 }
 
 // ─────────────────────────────────────────────
-// 2. ZYTE SCRAPER — Movoto listing extraction
+// 2. ZYTE SCRAPER — homes.com + HAR.com
 // ─────────────────────────────────────────────
 
-export async function scrapeMovotoCity(city: string, maxListings: number = 10): Promise<{ listings?: ScrapedListing[]; error?: string }> {
+// City → homes.com URL slug lookup
+const CITY_SLUGS: Record<string, string> = {
+    'Phoenix': 'phoenix-az', 'Dallas': 'dallas-tx', 'Atlanta': 'atlanta-ga',
+    'Charlotte': 'charlotte-nc', 'Nashville': 'nashville-tn', 'Tampa': 'tampa-fl',
+    'Las Vegas': 'las-vegas-nv', 'Houston': 'houston-tx', 'Denver': 'denver-co',
+    'Orlando': 'orlando-fl', 'Austin': 'austin-tx', 'Miami': 'miami-fl',
+    'San Antonio': 'san-antonio-tx', 'Scottsdale': 'scottsdale-az',
+    'Jacksonville': 'jacksonville-fl', 'Sacramento': 'sacramento-ca',
+    'Portland': 'portland-or', 'Raleigh': 'raleigh-nc',
+};
+
+async function zyteGet(url: string): Promise<{ html?: string; error?: string }> {
+    const res = await fetch('https://api.zyte.com/v1/extract', {
+        method: 'POST',
+        headers: {
+            'Authorization': `Basic ${Buffer.from(`${ZYTE_API_KEY}:`).toString('base64')}`,
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ url, browserHtml: true }),
+    });
+    if (!res.ok) return { error: `Zyte ${res.status}: ${await res.text()}` };
+    const data = await res.json();
+    return { html: data.browserHtml || '' };
+}
+
+// homes.com scraper — uses JSON-LD RealEstateListing schema
+export async function scrapeHomesCity(city: string, maxListings: number = 20): Promise<{ listings?: ScrapedListing[]; rawHtmlSnippet?: string; error?: string }> {
+    if (!ZYTE_API_KEY) return { error: 'ZYTE_API_KEY not configured' };
+
+    const slug = CITY_SLUGS[city] || city.toLowerCase().replace(/\s+/g, '-');
+    const url = `https://www.homes.com/homes-for-sale/${slug}/`;
+
+    try {
+        const { html, error } = await zyteGet(url);
+        if (error || !html) return { error: error || 'No HTML' };
+
+        const rawHtmlSnippet = html.slice(0, 2000);
+        const listings: ScrapedListing[] = [];
+
+        // Parse JSON-LD @graph
+        const jsonLdMatch = html.match(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
+        if (!jsonLdMatch) return { listings: [], rawHtmlSnippet, error: 'No JSON-LD found' };
+
+        const graphData = JSON.parse(jsonLdMatch[1]);
+        const items: any[] = graphData?.['@graph']?.[0]?.mainEntity?.itemListElement || [];
+
+        for (const item of items.slice(0, maxListings)) {
+            const addr = item?.mainEntity?.address;
+            if (!addr?.streetAddress) continue;
+
+            // Filter by price range
+            const price = item?.offers?.price || 0;
+            if (price < 150000 || price > 700000) continue;
+
+            const agent = item?.offers?.offeredBy;
+            const photo = item?.image || item?.mainEntity?.image || '';
+
+            const listing: ScrapedListing = {
+                address: addr.streetAddress,
+                city: addr.addressLocality || city,
+                price,
+                daysOnMarket: 0,
+                priceReduced: false,
+                photoCount: photo ? 1 : 0,
+                photos: photo ? [photo] : [],
+                agentName: agent?.name || '',
+                agentPhone: agent?.telephone || '',
+                listingUrl: item?.url || item?.mainEntity?.url || url,
+                keywords: [item?.description || ''].filter(Boolean),
+            };
+            listing.score = await scoreICP(listing);
+            listings.push(listing);
+        }
+
+        return { listings, rawHtmlSnippet };
+    } catch (error: any) {
+        return { error: error.message };
+    }
+}
+
+// HAR.com scraper — uses embedded JSON array (Houston MLS data)
+export async function scrapeHarCity(city: string, maxListings: number = 40): Promise<{ listings?: ScrapedListing[]; rawHtmlSnippet?: string; error?: string }> {
+    if (!ZYTE_API_KEY) return { error: 'ZYTE_API_KEY not configured' };
+
+    const url = `https://www.har.com/search/dosearch?type=residential&minprice=150000&maxprice=700000&status=A&city=${encodeURIComponent(city)}`;
+
+    try {
+        const { html, error } = await zyteGet(url);
+        if (error || !html) return { error: error || 'No HTML' };
+
+        const rawHtmlSnippet = html.slice(0, 2000);
+
+        // Find the JSON array embedded in the HTML
+        const idx = html.indexOf('FULLSTREETADDRESS');
+        if (idx === -1) return { listings: [], rawHtmlSnippet, error: 'No listing data in HAR HTML' };
+
+        const start = html.lastIndexOf('[{', idx);
+        const end = html.indexOf('}]', idx) + 2;
+        if (start === -1 || end < 2) return { listings: [], rawHtmlSnippet, error: 'Could not find JSON bounds' };
+
+        const arr: any[] = JSON.parse(html.slice(start, end));
+        const listings: ScrapedListing[] = [];
+
+        for (const item of arr.slice(0, maxListings)) {
+            if (!item.FULLSTREETADDRESS) continue;
+            const price = item.LISTPRICE || 0;
+            if (price < 150000 || price > 700000) continue;
+
+            const photo = item.PHOTOPRIMARY || '';
+            const priceReduced = item.LASTREDUCED && item.LISTPRICE < item.LISTPRICEORI;
+
+            const listing: ScrapedListing = {
+                address: `${item.FULLSTREETADDRESS}, ${item.CITY}, ${item.STATE} ${item.ZIP}`,
+                city: item.CITY || city,
+                price,
+                daysOnMarket: item.DOM || item.DAYSONMARKET || 0,
+                priceReduced: !!priceReduced,
+                photoCount: item.PHOTOCOUNT || 0,
+                photos: photo ? [photo] : [],
+                agentName: item.AGENTLISTNAME || '',
+                agentPhone: item.OFFICELISTPHONE || '',
+                agentEmail: item.OFFICEEMAIL || '',
+                listingUrl: item.PROPERTY_URL ? `https://www.har.com${item.PROPERTY_URL}` : url,
+                keywords: [item.SUBDIVISION || '', item.ARCHITECTURESTYLE || ''].filter(Boolean),
+            };
+            listing.score = await scoreICP(listing);
+            listings.push(listing);
+        }
+
+        return { listings, rawHtmlSnippet };
+    } catch (error: any) {
+        return { error: error.message };
+    }
+}
+
+// Legacy — kept for reference but no longer called
+export async function scrapeMovotoCity(city: string, maxListings: number = 10): Promise<{ listings?: ScrapedListing[]; rawHtmlSnippet?: string; error?: string }> {
     if (!ZYTE_API_KEY) return { error: 'ZYTE_API_KEY not configured' };
 
     try {
         const searchUrl = `https://www.movoto.com/search/?city=${encodeURIComponent(city)}&sort=listed_asc&priceLow=200000&priceHigh=600000&propertyTypes=single-family,condo`;
 
-        // Use Zyte's browser rendering to get the full page
         const zyteRes = await fetch('https://api.zyte.com/v1/extract', {
             method: 'POST',
             headers: {
@@ -83,36 +218,118 @@ export async function scrapeMovotoCity(city: string, maxListings: number = 10): 
 
         const zyteData = await zyteRes.json();
         const html: string = zyteData.browserHtml || '';
+        const rawHtmlSnippet = html.slice(0, 3000);
 
-        // Parse listings from HTML — extract JSON-LD or meta data
         const listings: ScrapedListing[] = [];
 
-        // Extract listing cards using regex patterns from Movoto's HTML structure
-        const addressMatches = html.matchAll(/"streetAddress"\s*:\s*"([^"]+)"/g);
-        const priceMatches = html.matchAll(/"price"\s*:\s*"?\$?([\d,]+)"?/g);
+        // Strategy 1: Next.js __NEXT_DATA__ JSON blob (most reliable for Next.js apps)
+        const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+        if (nextDataMatch) {
+            try {
+                const nextData = JSON.parse(nextDataMatch[1]);
+                // Walk common pageProps paths Movoto might use
+                const candidates = [
+                    nextData?.props?.pageProps?.listings,
+                    nextData?.props?.pageProps?.searchResults,
+                    nextData?.props?.pageProps?.properties,
+                    nextData?.props?.pageProps?.data?.listings,
+                    nextData?.props?.pageProps?.initialData?.listings,
+                ].find(v => Array.isArray(v) && v.length > 0);
 
-        const addresses = Array.from(addressMatches).map(m => m[1]);
-        const prices = Array.from(priceMatches).map(m => parseInt(m[1].replace(/,/g, '')));
-
-        // Build basic listing objects (Zyte will give us richer data with AutoExtract)
-        for (let i = 0; i < Math.min(addresses.length, maxListings); i++) {
-            const listing: ScrapedListing = {
-                address: addresses[i] || `Unknown Address ${i}`,
-                city,
-                price: prices[i] || 0,
-                daysOnMarket: 0,
-                priceReduced: html.toLowerCase().includes('price reduced'),
-                photoCount: 0,
-                photos: [],
-                agentName: '',
-                listingUrl: searchUrl,
-                keywords: [],
-            };
-            listing.score = await scoreICP(listing);
-            listings.push(listing);
+                if (candidates) {
+                    for (const item of candidates.slice(0, maxListings)) {
+                        const address = item?.address || item?.streetAddress || item?.location?.address || '';
+                        const price = parseInt(item?.price || item?.listPrice || item?.listing?.price || 0);
+                        const photos: string[] = item?.photos?.map((p: any) => p?.url || p?.src || p) ||
+                                                  item?.images?.map((p: any) => p?.url || p?.src || p) || [];
+                        if (!address) continue;
+                        const listing: ScrapedListing = {
+                            address,
+                            city,
+                            price,
+                            daysOnMarket: item?.daysOnMarket || item?.dom || 0,
+                            priceReduced: !!(item?.priceReduced || item?.priceChange),
+                            photoCount: photos.length,
+                            photos: photos.filter((p: any) => typeof p === 'string' && p.startsWith('http')),
+                            agentName: item?.agent?.name || item?.listingAgent?.name || '',
+                            agentPhone: item?.agent?.phone || item?.listingAgent?.phone,
+                            agentEmail: item?.agent?.email || item?.listingAgent?.email,
+                            listingUrl: item?.url ? `https://www.movoto.com${item.url}` : searchUrl,
+                            keywords: [item?.description || ''].filter(Boolean),
+                        };
+                        listing.score = await scoreICP(listing);
+                        listings.push(listing);
+                    }
+                }
+            } catch { /* fall through to regex */ }
         }
 
-        return { listings };
+        // Strategy 2: JSON-LD schema.org blocks
+        if (listings.length === 0) {
+            const jsonLdMatches = [...html.matchAll(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/g)];
+            for (const match of jsonLdMatches) {
+                try {
+                    const data = JSON.parse(match[1]);
+                    const items = data['@graph'] || (Array.isArray(data) ? data : [data]);
+                    for (const item of items) {
+                        if (!item?.address?.streetAddress && !item?.streetAddress) continue;
+                        const address = item?.address?.streetAddress || item?.streetAddress || '';
+                        const photos: string[] = (item?.photo || item?.image || [])
+                            .map((p: any) => typeof p === 'string' ? p : p?.url || p?.contentUrl)
+                            .filter((p: any) => typeof p === 'string' && p.startsWith('http'));
+                        const listing: ScrapedListing = {
+                            address,
+                            city,
+                            price: parseInt(item?.offers?.price || item?.price || 0),
+                            daysOnMarket: 0,
+                            priceReduced: false,
+                            photoCount: photos.length,
+                            photos,
+                            agentName: item?.agent?.name || '',
+                            listingUrl: item?.url || searchUrl,
+                            keywords: [item?.description || ''].filter(Boolean),
+                        };
+                        listing.score = await scoreICP(listing);
+                        listings.push(listing);
+                        if (listings.length >= maxListings) break;
+                    }
+                } catch { continue; }
+                if (listings.length >= maxListings) break;
+            }
+        }
+
+        // Strategy 3: Regex fallback
+        if (listings.length === 0) {
+            const addressMatches = [...html.matchAll(/"streetAddress"\s*:\s*"([^"]+)"/g)];
+            const priceMatches = [...html.matchAll(/"(?:price|listPrice)"\s*:\s*"?\$?([\d,]+)"?/g)];
+            const photoMatches = [...html.matchAll(/"(?:photoUrl|imageUrl|src)"\s*:\s*"(https:[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/g)];
+
+            const addresses = addressMatches.map(m => m[1]);
+            const prices = priceMatches.map(m => parseInt(m[1].replace(/,/g, '')));
+            const allPhotos = photoMatches.map(m => m[1]);
+
+            const priceReduced = html.toLowerCase().includes('price reduced') || html.toLowerCase().includes('price cut');
+
+            for (let i = 0; i < Math.min(addresses.length, maxListings); i++) {
+                const photos = allPhotos.slice(i * 5, i * 5 + 5);
+                const listing: ScrapedListing = {
+                    address: addresses[i],
+                    city,
+                    price: prices[i] || 0,
+                    daysOnMarket: 0,
+                    priceReduced,
+                    photoCount: photos.length,
+                    photos,
+                    agentName: '',
+                    listingUrl: searchUrl,
+                    keywords: [],
+                };
+                listing.score = await scoreICP(listing);
+                listings.push(listing);
+            }
+        }
+
+        return { listings, rawHtmlSnippet };
 
     } catch (error: any) {
         return { error: error.message };
@@ -162,6 +379,24 @@ export async function detectRoom(imageUrl: string): Promise<{
     if (!MOONDREAM_API_KEY) return { isEmpty: false, confidence: 0, roomType: 'unknown', error: 'MOONDREAM_API_KEY not configured' };
 
     try {
+        // Moondream requires base64 — fetch the image with browser-like headers to bypass hotlink protection
+        const imageOrigin = new URL(imageUrl).origin;
+        const imgRes = await fetch(imageUrl, {
+            headers: {
+                'Referer': imageOrigin,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Cache-Control': 'no-cache',
+            },
+        });
+        if (!imgRes.ok) return { isEmpty: false, confidence: 0, roomType: 'unknown', error: `Image fetch failed: ${imgRes.status}` };
+
+        const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+        const arrayBuffer = await imgRes.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString('base64');
+        const imageData = `data:${contentType};base64,${base64}`;
+
         const res = await fetch('https://api.moondream.ai/v1/query', {
             method: 'POST',
             headers: {
@@ -169,7 +404,7 @@ export async function detectRoom(imageUrl: string): Promise<{
                 'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-                image_url: imageUrl,
+                image: imageData,
                 question: 'Is this an empty, unfurnished real estate room? If yes, what kind of room is it most likely (e.g., bedroom, living room, dining room, kitchen, office)? Answer format: [Yes/No], [Confidence 0-100], [Room Type]',
                 stream: false,
             }),
@@ -183,7 +418,6 @@ export async function detectRoom(imageUrl: string): Promise<{
         const data = await res.json();
         const answer: string = data.answer || data.result || '';
 
-        // Parse "Yes, 85, living room" or "No, 20, N/A"
         const parts = answer.split(',').map((s: string) => s.trim());
         const isEmpty = parts[0]?.toLowerCase().startsWith('yes');
         const confidence = parseInt(parts[1]) || 0;
@@ -490,53 +724,100 @@ https://kogflow.com`;
 export async function runPipelineSession(config: {
     cities: string[];
     scrapesPerSession: number;
-}): Promise<{ processed: number; errors: string[] }> {
+    minLeads?: number;
+}): Promise<{ processed: number; errors: string[]; debug: string[] }> {
     const errors: string[] = [];
+    const debug: string[] = [];
     let processed = 0;
+    const minLeads = config.minLeads ?? 1;
 
-    for (const city of config.cities) {
-        const { listings, error } = await scrapeMovotoCity(city, Math.ceil(config.scrapesPerSession / config.cities.length));
+    // Keep cycling through cities until we hit minLeads or exhaust maxAttempts
+    const maxAttempts = config.cities.length * 3;
+    let attempts = 0;
 
-        if (error) { errors.push(`Scrape ${city}: ${error}`); continue; }
-        if (!listings) continue;
+    while (processed < minLeads && attempts < maxAttempts) {
+        const city = config.cities[attempts % config.cities.length];
+        const batchSize = Math.ceil(config.scrapesPerSession / config.cities.length);
+        attempts++;
+
+        // Houston → HAR.com (Houston Association of Realtors), all others → homes.com
+        const isHoustonArea = ['Houston', 'San Antonio', 'Dallas', 'Austin'].includes(city);
+        const scrapeResult = isHoustonArea
+            ? await scrapeHarCity(city, batchSize)
+            : await scrapeHomesCity(city, batchSize);
+
+        // Fallback: if primary scraper got 0 listings, try the other one
+        let { listings, rawHtmlSnippet, error } = scrapeResult;
+        if ((!listings || listings.length === 0) && !error) {
+            debug.push(`[${city}] Primary scraper got 0, trying fallback...`);
+            const fallback = isHoustonArea
+                ? await scrapeHomesCity(city, batchSize)
+                : await scrapeHarCity(city, batchSize);
+            listings = fallback.listings;
+            rawHtmlSnippet = fallback.rawHtmlSnippet;
+            if (fallback.error) error = fallback.error;
+        }
+
+        if (error) {
+            errors.push(`Scrape ${city}: ${error}`);
+            debug.push(`[${city}] Scrape error: ${error}`);
+            continue;
+        }
+
+        if (!listings || listings.length === 0) {
+            debug.push(`[${city}] 0 listings parsed from HTML. Snippet: ${rawHtmlSnippet?.slice(0, 200)}`);
+            continue;
+        }
+
+        debug.push(`[${city}] ${listings.length} listings found`);
 
         for (const listing of listings) {
-            // Score the lead
             listing.score = await scoreICP(listing);
-            if (listing.score < 5) continue; // Skip low-value leads
 
-            // Detect empty rooms using Moondream
+            // Detect empty rooms only if we have photos
             const emptyRooms: { roomType: string; imageUrl: string; stagedUrl?: string }[] = [];
-
-            for (const photoUrl of listing.photos.slice(0, 8)) { // Check first 8 photos
-                const { isEmpty, confidence, roomType } = await detectRoom(photoUrl);
-                if (isEmpty && confidence >= 60) {
-                    emptyRooms.push({ roomType, imageUrl: photoUrl });
+            if (listing.photos.length > 0) {
+                for (const photoUrl of listing.photos.slice(0, 8)) {
+                    const { isEmpty, confidence, roomType } = await detectRoom(photoUrl);
+                    if (isEmpty && confidence >= 60) {
+                        emptyRooms.push({ roomType, imageUrl: photoUrl });
+                    }
                 }
             }
 
-            if (emptyRooms.length < 2) continue; // ICP: need 2+ empty rooms
-
-            // Save to Supabase
+            // Save lead regardless of empty room count — score is the gate
             const saveResult = await saveLead({ ...listing, emptyRooms });
-            if (saveResult.skipped || saveResult.error) continue;
+            if (saveResult.skipped) {
+                debug.push(`[${city}] ${listing.address} — already in DB`);
+                continue;
+            }
+            if (saveResult.error) {
+                debug.push(`[${city}] ${listing.address} — save error: ${saveResult.error}`);
+                continue;
+            }
 
             const leadId = saveResult.lead?.id;
             if (!leadId) continue;
 
-            // Stage the first empty room
-            const firstRoom = emptyRooms[0];
-            const { taskId } = await stageEmptyRoom(firstRoom.imageUrl, firstRoom.roomType);
-
-            if (taskId) {
-                await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
+            // Stage the first empty room if available
+            if (emptyRooms.length > 0) {
+                const firstRoom = emptyRooms[0];
+                const { taskId } = await stageEmptyRoom(firstRoom.imageUrl, firstRoom.roomType);
+                if (taskId) {
+                    await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
+                }
             }
 
             processed++;
+            debug.push(`[${city}] ✓ Saved: ${listing.address} (score ${listing.score})`);
         }
     }
 
-    return { processed, errors };
+    if (processed < minLeads) {
+        debug.push(`Could not find ${minLeads} leads after ${attempts} attempts across cities`);
+    }
+
+    return { processed, errors, debug };
 }
 
 // ─────────────────────────────────────────────
@@ -565,7 +846,7 @@ export async function loadPipelineConfig(): Promise<{ config?: PipelineConfig; e
         .select('*')
         .eq('id', 1)
         .single();
-    if (error || !data) return { config: { sessions_per_day: 3, scrapes_per_session: 10, cities: ['Santa Ana', 'Garden Grove', 'Anaheim'] } };
+    if (error || !data) return { config: { sessions_per_day: 3, scrapes_per_session: 10, cities: ['Phoenix', 'Dallas', 'Atlanta', 'Charlotte', 'Nashville', 'Tampa', 'Las Vegas', 'Houston', 'Denver', 'Orlando'] } };
     return { config: { sessions_per_day: data.sessions_per_day, scrapes_per_session: data.scrapes_per_session, cities: data.cities } };
 }
 
@@ -602,4 +883,103 @@ export async function getRecentRuns(limit = 20): Promise<{ runs?: any[]; error?:
         .limit(limit);
     if (error) return { error: error.message };
     return { runs: data || [] };
+}
+
+// ─────────────────────────────────────────────
+// 11. SITE TESTER — Test Zyte against a URL
+// ─────────────────────────────────────────────
+
+export interface SiteTestResult {
+    site: string;
+    url: string;
+    status: 'ok' | 'blocked' | 'error';
+    htmlLength: number;
+    hasBody: boolean;
+    snippet: string;
+    nextDataFound: boolean;
+    jsonLdFound: boolean;
+    addressesFound: number;
+    photosFound: number;
+    sampleAddresses: string[];
+    error?: string;
+}
+
+const SITE_TEST_URLS: { site: string; url: string; name: string }[] = [
+    {
+        site: 'homes.com',
+        name: 'homes.com',
+        url: 'https://www.homes.com/homes-for-sale/phoenix-az/',
+    },
+    {
+        site: 'homepath.fanniemae.com',
+        name: 'HomePath (Fannie Mae)',
+        url: 'https://homepath.fanniemae.com/listings',
+    },
+    {
+        site: 'har.com',
+        name: 'HAR.com',
+        url: 'https://www.har.com/search/dosearch?type=residential&minprice=200000&maxprice=600000&status=A&city=Houston',
+    },
+];
+
+export async function testSiteWithZyte(siteKey: string): Promise<SiteTestResult> {
+    const target = SITE_TEST_URLS.find(s => s.site === siteKey);
+    if (!target) return { site: siteKey, url: '', status: 'error', htmlLength: 0, hasBody: false, snippet: '', nextDataFound: false, jsonLdFound: false, addressesFound: 0, photosFound: 0, sampleAddresses: [], error: 'Unknown site' };
+
+    if (!ZYTE_API_KEY) return { ...target, status: 'error', htmlLength: 0, hasBody: false, snippet: '', nextDataFound: false, jsonLdFound: false, addressesFound: 0, photosFound: 0, sampleAddresses: [], error: 'ZYTE_API_KEY not set' };
+
+    try {
+        const zyteRes = await fetch('https://api.zyte.com/v1/extract', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Basic ${Buffer.from(`${ZYTE_API_KEY}:`).toString('base64')}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ url: target.url, browserHtml: true }),
+        });
+
+        if (!zyteRes.ok) {
+            const err = await zyteRes.text();
+            return { ...target, status: 'error', htmlLength: 0, hasBody: false, snippet: err.slice(0, 500), nextDataFound: false, jsonLdFound: false, addressesFound: 0, photosFound: 0, sampleAddresses: [], error: `Zyte ${zyteRes.status}` };
+        }
+
+        const data = await zyteRes.json();
+        const html: string = data.browserHtml || '';
+
+        const hasBody = html.includes('<body') && html.length > 5000;
+        const nextDataFound = html.includes('__NEXT_DATA__');
+        const jsonLdFound = html.includes('application/ld+json');
+
+        // Count addresses via all patterns
+        const addressMatches = [...html.matchAll(/"streetAddress"\s*:\s*"([^"]+)"/g)];
+        const photoMatches = [...html.matchAll(/https:\/\/[^"']+\.(?:jpg|jpeg|png|webp)/g)];
+        const sampleAddresses = addressMatches.slice(0, 3).map(m => m[1]);
+
+        // Find a meaningful snippet — look for first body content
+        const bodyStart = html.indexOf('<body');
+        const snippet = bodyStart > -1
+            ? html.slice(bodyStart, bodyStart + 1500)
+            : html.slice(0, 1500);
+
+        return {
+            site: target.site,
+            url: target.url,
+            status: hasBody ? 'ok' : 'blocked',
+            htmlLength: html.length,
+            hasBody,
+            snippet,
+            nextDataFound,
+            jsonLdFound,
+            addressesFound: addressMatches.length,
+            photosFound: photoMatches.length,
+            sampleAddresses,
+        };
+
+    } catch (error: any) {
+        return { ...target, status: 'error', htmlLength: 0, hasBody: false, snippet: '', nextDataFound: false, jsonLdFound: false, addressesFound: 0, photosFound: 0, sampleAddresses: [], error: error.message };
+    }
+}
+
+export async function testAllSites(): Promise<SiteTestResult[]> {
+    return Promise.all(SITE_TEST_URLS.map(s => testSiteWithZyte(s.site)));
 }
