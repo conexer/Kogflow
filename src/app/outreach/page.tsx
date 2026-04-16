@@ -5,8 +5,8 @@ import { useAuth } from '@/lib/auth-context';
 import { useRouter } from 'next/navigation';
 import {
     Search, MapPin, Star, Clock, TrendingDown, Image, Mail,
-    Play, Pause, Settings, RefreshCw, CheckCircle, AlertCircle,
-    Zap, Database, Send, BarChart2, Filter, Copy, Terminal,
+    Play, Settings, RefreshCw, CheckCircle, AlertCircle,
+    Zap, Database, Send, BarChart2, Copy, Terminal,
     ChevronRight, ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -208,7 +208,7 @@ export default function OutreachPage() {
     const handleTestSites = async () => {
         setTestingSites(true);
         setSiteResults([]);
-        toast.loading('Testing all 3 sites with Zyte...', { id: 'sitetest' });
+        toast.loading('Testing all 8 sites with Zyte...', { id: 'sitetest' });
         try {
             const results = await testAllSites();
             setSiteResults(results);
@@ -275,7 +275,7 @@ export default function OutreachPage() {
                             Outreach Pipeline
                             <span className="text-xs bg-destructive/10 text-destructive px-2 py-0.5 rounded-full font-medium">Internal Only</span>
                         </h1>
-                        <p className="text-sm text-muted-foreground">Autonomous Kogflow Beta Outreach — Movoto → Moondream → Kie.ai → Gmail</p>
+                        <p className="text-sm text-muted-foreground">Autonomous Kogflow Beta Outreach — HAR.com & homes.com → Moondream → Kie.ai → Gmail</p>
                     </div>
                     <div className="flex items-center gap-3">
                         {dbReady === false && (
@@ -447,7 +447,7 @@ export default function OutreachPage() {
                                     type="url"
                                     value={testImageUrl}
                                     onChange={e => setTestImageUrl(e.target.value)}
-                                    placeholder="https://photos.movoto.com/..."
+                                    placeholder="https://photos.harstatic.com/..."
                                     className="flex-1 px-3 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-primary"
                                 />
                                 <button onClick={handleTestMoondream} disabled={testLoading}
@@ -588,9 +588,9 @@ export default function OutreachPage() {
                         <div className="bg-card border border-border rounded-xl p-6 space-y-4">
                             <h3 className="font-semibold">ICP Filters (Active)</h3>
                             <div className="grid grid-cols-2 gap-3 text-sm">
-                                <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Price range:</span> <span className="font-medium">$200k – $600k</span></div>
+                                <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Price range:</span> <span className="font-medium">$150k – $700k</span></div>
                                 <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Min DOM:</span> <span className="font-medium">30 days</span></div>
-                                <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Min empty rooms:</span> <span className="font-medium">2</span></div>
+                                <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Min empty rooms:</span> <span className="font-medium">scored regardless</span></div>
                                 <div className="p-3 bg-muted/30 rounded-lg"><span className="text-muted-foreground">Sort:</span> <span className="font-medium">Oldest first</span></div>
                             </div>
                             <div className="flex flex-wrap gap-2">
