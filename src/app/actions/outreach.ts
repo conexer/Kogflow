@@ -485,7 +485,7 @@ export async function detectRoom(imageUrl: string): Promise<{
             },
             body: JSON.stringify({
                 image: imageData,
-                question: 'Is this an empty, unfurnished real estate room? If yes, what kind of room is it most likely (e.g., bedroom, living room, dining room, kitchen, office)? Answer format: [Yes/No], [Confidence 0-100], [Room Type]',
+                question: 'Is this room empty and unfurnished with no furniture? Reply in this exact format with no brackets: YES or NO, then a number 0 to 100 for your confidence, then the room type. Example: YES, 85, bedroom',
                 stream: false,
             }),
         });
@@ -498,10 +498,20 @@ export async function detectRoom(imageUrl: string): Promise<{
         const data = await res.json();
         const answer: string = data.answer || data.result || '';
 
-        const parts = answer.split(',').map((s: string) => s.trim());
-        const isEmpty = parts[0]?.toLowerCase().startsWith('yes');
-        const confidence = parseInt(parts[1]) || 0;
-        const roomType = parts[2]?.toLowerCase() || 'unknown';
+        // Strip brackets, normalize — Moondream often ignores format instructions
+        const clean = answer.replace(/[\[\]]/g, '').trim();
+        // Check for YES/NO anywhere in the answer (handles "YES 0", "Yes,85,bedroom", "[Yes]" etc.)
+        const isEmpty = /\byes\b/i.test(clean);
+        // Extract first number found — handles "85", "0-10" (take upper), "YES 0"
+        const numMatch = clean.match(/(\d+)(?:\s*-\s*(\d+))?/);
+        const rawConf = numMatch
+            ? numMatch[2] ? parseInt(numMatch[2]) : parseInt(numMatch[1])
+            : 0;
+        // If Moondream says YES but gives very low/zero confidence, default to 50 (trust the YES)
+        const confidence = isEmpty && rawConf <= 15 ? 50 : rawConf;
+        // Extract room type — last word-group after removing YES/NO and numbers
+        const roomTypeMatch = clean.replace(/\byes\b|\bno\b|\d+(-\d+)?/gi, '').replace(/[,\s]+/g, ' ').trim();
+        const roomType = roomTypeMatch.toLowerCase() || 'unknown';
 
         return { isEmpty, confidence, roomType };
 
@@ -864,7 +874,7 @@ export async function runPipelineSession(config: {
         if (listing.photos.length > 0) {
             for (const photoUrl of listing.photos.slice(0, 8)) {
                 const { isEmpty, confidence, roomType } = await detectRoom(photoUrl);
-                if (isEmpty && confidence >= 60) {
+                if (isEmpty && confidence >= 20) {
                     emptyRooms.push({ roomType, imageUrl: photoUrl });
                 }
             }
