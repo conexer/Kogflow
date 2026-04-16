@@ -104,15 +104,8 @@ async function zyteGet(url: string, _city?: string): Promise<{ html?: string; er
     const payload: Record<string, any> = {
         url,
         browserHtml: true,
-        // Route Zyte proxy through US — country code string, not lat/lng
+        // Route Zyte proxy through US (country code — not lat/lng)
         geolocation: 'US',
-        // Realistic browser headers reduce bot-detection signals
-        customHttpRequestHeaders: [
-            { name: 'Accept-Language', value: 'en-US,en;q=0.9' },
-            { name: 'Accept', value: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' },
-            { name: 'Cache-Control', value: 'no-cache' },
-            { name: 'Pragma', value: 'no-cache' },
-        ],
     };
 
     const res = await fetch('https://api.zyte.com/v1/extract', {
