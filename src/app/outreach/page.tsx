@@ -177,8 +177,12 @@ export default function OutreachPage() {
         try {
             const result = await runPipelineSession({ cities: selectedCities, scrapesPerSession, minLeads: 1 });
             toast.dismiss('pipeline');
-            if (result.processed > 0) toast.success(`Session complete: ${result.processed} leads saved`);
-            else toast.error('0 leads found — check debug log below');
+            if (result.processed > 0) {
+                toast.success(`Session complete: ${result.processed} leads saved`);
+                setActiveTab('leads');
+            } else {
+                toast.error('0 leads found — check debug log below');
+            }
             if (result.errors.length > 0) toast.error(`${result.errors[0]}`);
             setLastDebug(result.debug || []);
             await loadData();
@@ -468,12 +472,16 @@ export default function OutreachPage() {
                     <div className="space-y-4">
                         <div className="flex items-center justify-between">
                             <h2 className="font-bold text-lg">Lead Queue <span className="text-muted-foreground font-normal text-sm">({leads.length} total, ordered by ICP score)</span></h2>
+                            <button onClick={loadData} disabled={loadingData} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground border border-border rounded-lg hover:bg-muted transition-colors disabled:opacity-50">
+                                <RefreshCw className={`w-3.5 h-3.5 ${loadingData ? 'animate-spin' : ''}`} />
+                                Refresh
+                            </button>
                         </div>
                         {leads.length === 0 ? (
                             <div className="bg-card border border-dashed border-border rounded-xl p-16 text-center space-y-3">
                                 <Search className="w-10 h-10 text-muted-foreground/50 mx-auto" />
                                 <h3 className="font-medium text-muted-foreground">No leads yet</h3>
-                                <p className="text-sm text-muted-foreground">Click "Run Session" to start scraping Movoto listings</p>
+                                <p className="text-sm text-muted-foreground">Go to Dashboard → click "Run Session" to start scraping listings</p>
                             </div>
                         ) : (
                             <div className="space-y-2">
