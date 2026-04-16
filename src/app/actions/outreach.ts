@@ -67,14 +67,66 @@ const CITY_SLUGS: Record<string, string> = {
     'Portland': 'portland-or', 'Raleigh': 'raleigh-nc',
 };
 
-async function zyteGet(url: string): Promise<{ html?: string; error?: string }> {
+// City → GPS coordinates for Zyte geolocation spoofing
+// Makes sites serve city-specific content instead of national/generic pages
+const CITY_COORDS: Record<string, { latitude: number; longitude: number }> = {
+    'Houston': { latitude: 29.7604, longitude: -95.3698 },
+    'Katy': { latitude: 29.7858, longitude: -95.8245 },
+    'Sugar Land': { latitude: 29.6197, longitude: -95.6349 },
+    'Spring': { latitude: 30.0799, longitude: -95.4172 },
+    'Pearland': { latitude: 29.5635, longitude: -95.2860 },
+    'The Woodlands': { latitude: 30.1658, longitude: -95.4613 },
+    'Cypress': { latitude: 29.9691, longitude: -95.6972 },
+    'Pasadena': { latitude: 29.6911, longitude: -95.2091 },
+    'Humble': { latitude: 29.9988, longitude: -95.2627 },
+    'Friendswood': { latitude: 29.5294, longitude: -95.2010 },
+    'League City': { latitude: 29.5075, longitude: -95.0949 },
+    'Baytown': { latitude: 29.7355, longitude: -94.9774 },
+    'Conroe': { latitude: 30.3119, longitude: -95.4561 },
+    'Tomball': { latitude: 30.0974, longitude: -95.6163 },
+    'Richmond': { latitude: 29.5819, longitude: -95.7608 },
+    'Rosenberg': { latitude: 29.5572, longitude: -95.8086 },
+    'Austin': { latitude: 30.2672, longitude: -97.7431 },
+    'San Antonio': { latitude: 29.4241, longitude: -98.4936 },
+    'Dallas': { latitude: 32.7767, longitude: -96.7970 },
+    'Fort Worth': { latitude: 32.7555, longitude: -97.3308 },
+    'Phoenix': { latitude: 33.4484, longitude: -112.0740 },
+    'Atlanta': { latitude: 33.7490, longitude: -84.3880 },
+    'Las Vegas': { latitude: 36.1699, longitude: -115.1398 },
+    'Denver': { latitude: 39.7392, longitude: -104.9903 },
+    'Nashville': { latitude: 36.1627, longitude: -86.7816 },
+    'Charlotte': { latitude: 35.2271, longitude: -80.8431 },
+    'Tampa': { latitude: 27.9506, longitude: -82.4572 },
+    'Orlando': { latitude: 28.5383, longitude: -81.3792 },
+};
+
+async function zyteGet(url: string, city?: string): Promise<{ html?: string; error?: string }> {
+    const coords = city ? CITY_COORDS[city] : undefined;
+
+    const payload: Record<string, any> = {
+        url,
+        browserHtml: true,
+        // Realistic browser headers reduce bot-detection signals
+        customHttpRequestHeaders: [
+            { name: 'Accept-Language', value: 'en-US,en;q=0.9' },
+            { name: 'Accept', value: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8' },
+            { name: 'Cache-Control', value: 'no-cache' },
+            { name: 'Pragma', value: 'no-cache' },
+        ],
+    };
+
+    // Spoof GPS to match target city — causes sites to serve city-specific content
+    if (coords) {
+        payload.geolocation = { ...coords, accuracy: 150 };
+    }
+
     const res = await fetch('https://api.zyte.com/v1/extract', {
         method: 'POST',
         headers: {
             'Authorization': `Basic ${Buffer.from(`${ZYTE_API_KEY}:`).toString('base64')}`,
             'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ url, browserHtml: true }),
+        body: JSON.stringify(payload),
     });
     if (!res.ok) return { error: `Zyte ${res.status}: ${await res.text()}` };
     const data = await res.json();
@@ -91,7 +143,7 @@ export async function scrapeHomesCity(city: string, maxListings: number = 20): P
     const url = `https://www.homes.com/homes-for-sale/${slug}/`;
 
     try {
-        const { html, error } = await zyteGet(url);
+        const { html, error } = await zyteGet(url, city);
         if (error || !html) return { error: error || 'No HTML' };
 
         const rawHtmlSnippet = html.slice(0, 2000);
@@ -148,36 +200,55 @@ export async function scrapeHomesCity(city: string, maxListings: number = 20): P
     }
 }
 
-// HAR.com scraper — uses embedded JSON array (Houston MLS data)
-export async function scrapeHarCity(city: string, maxListings: number = 40): Promise<{ listings?: ScrapedListing[]; rawHtmlSnippet?: string; error?: string }> {
+// HAR.com scraper — uses embedded JSON array (Texas MLS data)
+// Supports multi-page fetch to maximise listing yield per city
+export async function scrapeHarCity(city: string, maxListings: number = 40, pages: number = 2): Promise<{ listings?: ScrapedListing[]; rawHtmlSnippet?: string; error?: string }> {
     if (!ZYTE_API_KEY) return { error: 'ZYTE_API_KEY not configured' };
 
-    const url = `https://www.har.com/search/dosearch?type=residential&minprice=150000&maxprice=700000&status=A&city=${encodeURIComponent(city)}`;
+    const baseUrl = `https://www.har.com/search/dosearch?type=residential&minprice=150000&maxprice=700000&status=A&city=${encodeURIComponent(city)}`;
 
-    try {
-        const { html, error } = await zyteGet(url);
-        if (error || !html) return { error: error || 'No HTML' };
-
-        const rawHtmlSnippet = html.slice(0, 2000);
-
-        // Find the JSON array embedded in the HTML — use bracket counting for robustness
+    // Helper: parse a single HAR page HTML into listing rows
+    function parseHarHtml(html: string): any[] {
         const idx = html.indexOf('"FULLSTREETADDRESS"');
-        if (idx === -1) return { listings: [], rawHtmlSnippet, error: 'No listing data in HAR HTML' };
-
+        if (idx === -1) return [];
         const start = html.lastIndexOf('[{', idx);
-        if (start === -1) return { listings: [], rawHtmlSnippet, error: 'Could not find JSON array start' };
-
-        // Count brackets to find matching end
-        let depth = 0;
-        let end = start;
+        if (start === -1) return [];
+        let depth = 0, end = start;
         for (let i = start; i < Math.min(start + 2000000, html.length); i++) {
             const ch = html[i];
             if (ch === '[' || ch === '{') depth++;
             else if (ch === ']' || ch === '}') { depth--; if (depth === 0) { end = i + 1; break; } }
         }
-        if (end <= start) return { listings: [], rawHtmlSnippet, error: 'Could not find JSON array end' };
+        if (end <= start) return [];
+        try { return JSON.parse(html.slice(start, end)); } catch { return []; }
+    }
 
-        const arr: any[] = JSON.parse(html.slice(start, end));
+    try {
+        // Fetch pages in parallel (page 1 + extra pages simultaneously)
+        const pageUrls = Array.from({ length: pages }, (_, i) =>
+            i === 0 ? baseUrl : `${baseUrl}&p=${i + 1}`
+        );
+        const pageResults = await Promise.all(pageUrls.map(url => zyteGet(url, city)));
+
+        const rawHtmlSnippet = pageResults[0]?.html?.slice(0, 2000) || '';
+        if (pageResults[0]?.error) return { error: pageResults[0].error };
+
+        // Merge all rows, deduplicate by FULLSTREETADDRESS
+        const seen = new Set<string>();
+        const allRows: any[] = [];
+        for (const { html } of pageResults) {
+            if (!html) continue;
+            for (const row of parseHarHtml(html)) {
+                if (row.FULLSTREETADDRESS && !seen.has(row.FULLSTREETADDRESS)) {
+                    seen.add(row.FULLSTREETADDRESS);
+                    allRows.push(row);
+                }
+            }
+        }
+
+        if (allRows.length === 0) return { listings: [], rawHtmlSnippet, error: 'No listing data in HAR HTML' };
+
+        const arr = allRows;
         const listings: ScrapedListing[] = [];
 
         for (const item of arr.slice(0, maxListings)) {
@@ -199,7 +270,7 @@ export async function scrapeHarCity(city: string, maxListings: number = 40): Pro
                 agentName: item.AGENTLISTNAME || '',
                 agentPhone: item.OFFICELISTPHONE || '',
                 agentEmail: item.OFFICEEMAIL || '',
-                listingUrl: item.PROPERTY_URL ? `https://www.har.com${item.PROPERTY_URL}` : url,
+                listingUrl: item.PROPERTY_URL ? `https://www.har.com${item.PROPERTY_URL}` : baseUrl,
                 keywords: [item.SUBDIVISION || '', item.ARCHITECTURESTYLE || ''].filter(Boolean),
             };
             listing.score = await scoreICP(listing);
@@ -751,86 +822,98 @@ export async function runPipelineSession(config: {
     const debug: string[] = [];
     let processed = 0;
     const minLeads = config.minLeads ?? 1;
+    const batchSize = Math.max(20, Math.ceil(config.scrapesPerSession / Math.max(config.cities.length, 1)));
 
-    // Keep cycling through cities until we hit minLeads or exhaust maxAttempts
-    const maxAttempts = config.cities.length * 3;
-    let attempts = 0;
+    // ── Step 1: Scrape all cities in PARALLEL (huge speed boost) ──────────────
+    debug.push(`Scraping ${config.cities.length} cities in parallel (${batchSize} listings each, 2 HAR pages)...`);
 
-    while (processed < minLeads && attempts < maxAttempts) {
-        const city = config.cities[attempts % config.cities.length];
-        const batchSize = Math.ceil(config.scrapesPerSession / config.cities.length);
-        attempts++;
+    const cityResults = await Promise.all(
+        config.cities.map(async (city) => {
+            // HAR.com primary (2 pages = up to 240 listings per city), homes.com fallback
+            const harResult = await scrapeHarCity(city, batchSize, 2);
+            if (harResult.listings && harResult.listings.length > 0) {
+                debug.push(`[${city}] HAR: ${harResult.listings.length} listings`);
+                return { city, listings: harResult.listings };
+            }
+            if (harResult.error) debug.push(`[${city}] HAR error: ${harResult.error}`);
+            else debug.push(`[${city}] HAR: 0 listings — trying homes.com...`);
 
-        // HAR.com is primary (works for any city name), homes.com is fallback
-        const harResult = await scrapeHarCity(city, batchSize);
-        let { listings, rawHtmlSnippet, error } = harResult;
-
-        // Fallback to homes.com if HAR returned 0 listings
-        if ((!listings || listings.length === 0) && !error) {
-            debug.push(`[${city}] HAR got 0 listings, trying homes.com...`);
+            // Fallback: homes.com with geolocation
             const homesResult = await scrapeHomesCity(city, batchSize);
-            listings = homesResult.listings;
-            rawHtmlSnippet = homesResult.rawHtmlSnippet;
-            if (homesResult.error) error = homesResult.error;
-        }
-
-        if (error) {
-            errors.push(`Scrape ${city}: ${error}`);
-            debug.push(`[${city}] Scrape error: ${error}`);
-            continue;
-        }
-
-        if (!listings || listings.length === 0) {
-            debug.push(`[${city}] 0 listings parsed from HTML. Snippet: ${rawHtmlSnippet?.slice(0, 200)}`);
-            continue;
-        }
-
-        debug.push(`[${city}] ${listings.length} listings found`);
-
-        for (const listing of listings) {
-            listing.score = await scoreICP(listing);
-
-            // Detect empty rooms only if we have photos
-            const emptyRooms: { roomType: string; imageUrl: string; stagedUrl?: string }[] = [];
-            if (listing.photos.length > 0) {
-                for (const photoUrl of listing.photos.slice(0, 8)) {
-                    const { isEmpty, confidence, roomType } = await detectRoom(photoUrl);
-                    if (isEmpty && confidence >= 60) {
-                        emptyRooms.push({ roomType, imageUrl: photoUrl });
-                    }
-                }
+            if (homesResult.listings && homesResult.listings.length > 0) {
+                debug.push(`[${city}] homes.com: ${homesResult.listings.length} listings`);
+                return { city, listings: homesResult.listings };
             }
-
-            // Save lead regardless of empty room count — score is the gate
-            const saveResult = await saveLead({ ...listing, emptyRooms });
-            if (saveResult.skipped) {
-                debug.push(`[${city}] ${listing.address} — already in DB`);
-                continue;
+            if (homesResult.error) {
+                errors.push(`${city}: ${homesResult.error}`);
+                debug.push(`[${city}] homes.com error: ${homesResult.error}`);
+            } else {
+                debug.push(`[${city}] homes.com: 0 listings`);
             }
-            if (saveResult.error) {
-                debug.push(`[${city}] ${listing.address} — save error: ${saveResult.error}`);
-                continue;
+            return { city, listings: [] as ScrapedListing[] };
+        })
+    );
+
+    // Flatten all listings, deduplicate by address
+    const seenAddresses = new Set<string>();
+    const allListings: ScrapedListing[] = [];
+    for (const { listings } of cityResults) {
+        for (const l of listings) {
+            if (!seenAddresses.has(l.address)) {
+                seenAddresses.add(l.address);
+                allListings.push(l);
             }
-
-            const leadId = saveResult.lead?.id;
-            if (!leadId) continue;
-
-            // Stage the first empty room if available
-            if (emptyRooms.length > 0) {
-                const firstRoom = emptyRooms[0];
-                const { taskId } = await stageEmptyRoom(firstRoom.imageUrl, firstRoom.roomType);
-                if (taskId) {
-                    await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
-                }
-            }
-
-            processed++;
-            debug.push(`[${city}] ✓ Saved: ${listing.address} (score ${listing.score})`);
         }
     }
+    debug.push(`Total unique listings across all cities: ${allListings.length}`);
 
-    if (processed < minLeads) {
-        debug.push(`Could not find ${minLeads} leads after ${attempts} attempts across cities`);
+    // ── Step 2: Process & save each listing ───────────────────────────────────
+    for (const listing of allListings) {
+        listing.score = await scoreICP(listing);
+
+        // Detect empty rooms only if we have photos
+        const emptyRooms: { roomType: string; imageUrl: string; stagedUrl?: string }[] = [];
+        if (listing.photos.length > 0) {
+            for (const photoUrl of listing.photos.slice(0, 8)) {
+                const { isEmpty, confidence, roomType } = await detectRoom(photoUrl);
+                if (isEmpty && confidence >= 60) {
+                    emptyRooms.push({ roomType, imageUrl: photoUrl });
+                }
+            }
+        }
+
+        // Save lead
+        const saveResult = await saveLead({ ...listing, emptyRooms });
+        if (saveResult.skipped) {
+            debug.push(`[${listing.city}] ${listing.address} — already in DB`);
+            continue;
+        }
+        if (saveResult.error) {
+            debug.push(`[${listing.city}] ${listing.address} — save error: ${saveResult.error}`);
+            errors.push(`Save error: ${saveResult.error}`);
+            continue;
+        }
+
+        const leadId = saveResult.lead?.id;
+        if (!leadId) continue;
+
+        // Stage the first empty room if available
+        if (emptyRooms.length > 0) {
+            const firstRoom = emptyRooms[0];
+            const { taskId } = await stageEmptyRoom(firstRoom.imageUrl, firstRoom.roomType);
+            if (taskId) {
+                await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
+            }
+        }
+
+        processed++;
+        debug.push(`[${listing.city}] ✓ Saved: ${listing.address} (score ${listing.score})`);
+    }
+
+    if (allListings.length === 0) {
+        debug.push('No listings found across any city — check city list and Zyte API key');
+    } else if (processed === 0) {
+        debug.push('Listings were found but all skipped (already in DB or save errors)');
     }
 
     return { processed, errors, debug };
