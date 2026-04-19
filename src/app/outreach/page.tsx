@@ -140,6 +140,12 @@ export default function OutreachPage() {
     const [leads, setLeads] = useState<any[]>([]);
     const [loadingData, setLoadingData] = useState(false);
 
+    // Stats reset (stored in localStorage — no DB migration needed)
+    const [statsResetAt, setStatsResetAt] = useState<string | undefined>(() =>
+        typeof window !== 'undefined' ? (localStorage.getItem('stats_reset_at') ?? undefined) : undefined
+    );
+    const [resettingStats, setResettingStats] = useState(false);
+
     // Pipeline config
     const [sessionsPerDay, setSessionsPerDay] = useState(3);
     const [scrapesPerSession, setScrapesPerSession] = useState(10);
@@ -180,8 +186,9 @@ export default function OutreachPage() {
     const loadData = useCallback(async () => {
         setLoadingData(true);
         try {
+            const resetAt = typeof window !== 'undefined' ? (localStorage.getItem('stats_reset_at') ?? undefined) : undefined;
             const [statsRes, leadsRes, configRes, runsRes, siteStatsRes] = await Promise.all([
-                getLeadStats(), getLeads(), loadPipelineConfig(), getRecentRuns(), getSiteStats(),
+                getLeadStats(resetAt), getLeads(), loadPipelineConfig(), getRecentRuns(), getSiteStats(),
             ]);
             if ('error' in statsRes && statsRes.error?.includes('outreach_leads')) {
                 setDbReady(false);
@@ -198,6 +205,7 @@ export default function OutreachPage() {
                 if (runsRes.runs) setRecentRuns(runsRes.runs);
                 if (siteStatsRes.stats) setSiteStats(siteStatsRes.stats);
             }
+
         } catch {
             setDbReady(false);
         }
@@ -370,6 +378,16 @@ export default function OutreachPage() {
         }
     };
 
+    const handleResetStats = async () => {
+        setResettingStats(true);
+        const now = new Date().toISOString();
+        localStorage.setItem('stats_reset_at', now);
+        setStatsResetAt(now);
+        toast.success('Stats reset — counting from now forward');
+        await loadData();
+        setResettingStats(false);
+    };
+
     const handleTestMoondream = async () => {
         if (!testImageUrl) { toast.error('Enter an image URL'); return; }
         setTestLoading(true);
@@ -443,6 +461,19 @@ export default function OutreachPage() {
                 {/* ── DASHBOARD TAB ── */}
                 {activeTab === 'dashboard' && (
                     <div className="space-y-8">
+                        <div className="flex items-center justify-between">
+                            <h2 className="font-semibold text-sm text-muted-foreground">
+                                {statsResetAt ? `Stats since ${new Date(statsResetAt).toLocaleDateString()}` : 'All-time stats'}
+                            </h2>
+                            <button
+                                onClick={handleResetStats}
+                                disabled={resettingStats}
+                                className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+                            >
+                                <RefreshCw className={cn("w-3 h-3", resettingStats && "animate-spin")} />
+                                Reset Stats
+                            </button>
+                        </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                             {[
                                 { label: 'Total Leads', value: stats.total, icon: Database, color: 'text-blue-400' },

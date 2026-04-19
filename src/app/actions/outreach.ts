@@ -745,12 +745,13 @@ export async function pollAndEmailStagedLeads(): Promise<{ emailed: number; stil
     return { emailed, stillProcessing, failed, errors };
 }
 
-export async function getLeadStats() {
+export async function getLeadStats(since?: string) {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const { data, error } = await supabase
-        .from('outreach_leads')
-        .select('status, icp_score, photo_count, empty_rooms');
+    let query = supabase.from('outreach_leads').select('status, icp_score, photo_count, empty_rooms');
+    if (since) query = query.gte('created_at', since);
+
+    const { data, error } = await query;
 
     if (error) return { error: error.message };
 
