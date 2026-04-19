@@ -10,7 +10,7 @@ import {
     ChevronRight, ExternalLink
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { getLeadStats, getLeads, runPipelineSession, detectRoom, sendOutreachEmail, updateLeadStatus, savePipelineConfig, loadPipelineConfig, getRecentRuns, testAllSites, getSiteStats, getSessionLog, submitStagingBatch, pollAndEmailStagedLeads, scanForEmptyRooms, getRecentActivityLog, type SiteTestResult } from '@/app/actions/outreach';
+import { getLeadStats, getLeads, runPipelineSession, detectRoom, sendOutreachEmail, updateLeadStatus, savePipelineConfig, loadPipelineConfig, getRecentRuns, testAllSites, getSiteStats, getSessionLog, submitStagingBatch, pollAndEmailStagedLeads, scanForEmptyRooms, getRecentActivityLog, getActiveSession, requestSessionStop, type SiteTestResult } from '@/app/actions/outreach';
 import { toast } from 'sonner';
 
 const ALLOWED_EMAILS = ['conexer@gmail.com', 'rocsolid01@gmail.com'];
@@ -191,8 +191,8 @@ export default function OutreachPage() {
         setLoadingData(true);
         try {
             const resetAt = typeof window !== 'undefined' ? (localStorage.getItem('stats_reset_at') ?? undefined) : undefined;
-            const [statsRes, leadsRes, configRes, runsRes, siteStatsRes, activityRes] = await Promise.all([
-                getLeadStats(resetAt), getLeads(), loadPipelineConfig(), getRecentRuns(), getSiteStats(), getRecentActivityLog(),
+            const [statsRes, leadsRes, configRes, runsRes, siteStatsRes, activityRes, activeSessionRes] = await Promise.all([
+                getLeadStats(resetAt), getLeads(), loadPipelineConfig(), getRecentRuns(), getSiteStats(), getRecentActivityLog(), getActiveSession(),
             ]);
             if ('error' in statsRes && statsRes.error?.includes('outreach_leads')) {
                 setDbReady(false);
@@ -213,6 +213,31 @@ export default function OutreachPage() {
                     setTimeout(() => {
                         if (activityLogRef.current) activityLogRef.current.scrollTop = activityLogRef.current.scrollHeight;
                     }, 50);
+                }
+                // Resume running state if a session is still active (survives page reload)
+                if (activeSessionRes.isRunning && activeSessionRes.sessionId && !runningSession) {
+                    setRunningSession(true);
+                    setActiveSessionId(activeSessionRes.sessionId);
+                    // Start polling the activity log
+                    if (!pollRef.current) {
+                        pollRef.current = setInterval(async () => {
+                            const [{ entries }, { isRunning }] = await Promise.all([
+                                getRecentActivityLog(),
+                                getActiveSession(),
+                            ]);
+                            if (entries) {
+                                setActivityLog(entries);
+                                if (activityLogRef.current) activityLogRef.current.scrollTop = activityLogRef.current.scrollHeight;
+                            }
+                            if (!isRunning) {
+                                clearInterval(pollRef.current!);
+                                pollRef.current = null;
+                                setRunningSession(false);
+                                setActiveSessionId(null);
+                                await loadData();
+                            }
+                        }, 2000);
+                    }
                 }
             }
 
@@ -392,6 +417,12 @@ export default function OutreachPage() {
         }
     };
 
+    const handleStopSession = async () => {
+        if (!activeSessionId) return;
+        await requestSessionStop(activeSessionId);
+        toast.info('Stop requested — pipeline will halt after current lead');
+    };
+
     const handleResetStats = async () => {
         setResettingStats(true);
         const now = new Date().toISOString();
@@ -438,18 +469,27 @@ export default function OutreachPage() {
                                 <AlertCircle className="w-4 h-4" /> DB Setup Required
                             </button>
                         )}
-                        {dbReady && (
+                        {dbReady && !runningSession && (
                             <button
                                 onClick={handleRunSession}
-                                disabled={runningSession}
-                                className={cn("flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors",
-                                    runningSession ? "bg-muted text-muted-foreground" : "bg-primary text-primary-foreground hover:bg-primary/90"
-                                )}
+                                className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
                             >
-                                {runningSession
-                                    ? <><div className="w-4 h-4 border-2 border-current/30 border-t-current rounded-full animate-spin" /> Running...</>
-                                    : <><Play className="w-4 h-4" /> Run Session</>}
+                                <Play className="w-4 h-4" /> Run Session
                             </button>
+                        )}
+                        {dbReady && runningSession && (
+                            <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm bg-muted text-muted-foreground">
+                                    <div className="w-4 h-4 border-2 border-current/30 border-t-green-400 rounded-full animate-spin" />
+                                    Running...
+                                </div>
+                                <button
+                                    onClick={handleStopSession}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm bg-destructive/10 text-destructive hover:bg-destructive/20 border border-destructive/30 transition-colors"
+                                >
+                                    Stop
+                                </button>
+                            </div>
                         )}
                         <button onClick={loadData} className="p-2 hover:bg-muted rounded-lg transition-colors">
                             <RefreshCw className={cn("w-4 h-4", loadingData && "animate-spin")} />

@@ -1075,6 +1075,31 @@ export async function getSessionLog(sessionId: string): Promise<{ logs?: string[
     return { logs: data?.map(r => r.message) || [] };
 }
 
+export async function getActiveSession(): Promise<{ sessionId?: string; isRunning: boolean }> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    const since = new Date(Date.now() - 20 * 60 * 1000).toISOString(); // last 20 min
+    const { data } = await supabase
+        .from('pipeline_session_log')
+        .select('session_id, message, logged_at')
+        .gte('logged_at', since)
+        .order('logged_at', { ascending: false })
+        .limit(200);
+    if (!data || data.length === 0) return { isRunning: false };
+    // Find the most recently started session
+    const startEntry = data.find(r => r.message === '__SESSION_START__');
+    if (!startEntry) return { isRunning: false };
+    const sid = startEntry.session_id;
+    // If that session already has a complete or stop marker, it's done
+    const isDone = data.some(r => r.session_id === sid && (r.message === '__SESSION_COMPLETE__' || r.message === '__STOP_REQUESTED__'));
+    if (isDone) return { isRunning: false };
+    return { sessionId: sid, isRunning: true };
+}
+
+export async function requestSessionStop(sessionId: string): Promise<void> {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+    await supabase.from('pipeline_session_log').insert({ session_id: sessionId, message: '__STOP_REQUESTED__' });
+}
+
 export async function getRecentActivityLog(limit = 300): Promise<{ entries?: { logged_at: string; session_id: string; message: string }[]; error?: string }> {
     const supabase = createClient(supabaseUrl, supabaseKey);
     const { data, error } = await supabase
@@ -1122,6 +1147,9 @@ export async function runPipelineSession(config: {
             );
         }
     }
+
+    // Write sentinel so UI can detect active session on page reload
+    await supabase.from('pipeline_session_log').insert({ session_id: sessionId, message: '__SESSION_START__' });
 
     await log(`Session ${sessionId} started`);
     await log(`Scraping ${config.cities.length} cities in parallel (${batchSize} listings each, 2 HAR pages)...`);
@@ -1222,6 +1250,22 @@ export async function runPipelineSession(config: {
     await log(`Target: ${minEmptyRooms} empty rooms (checking up to ${MAX_MOONDREAM} vacant/long-DOM leads)`);
 
     for (const listing of toProcess) {
+        // Check for stop request every 3rd lead to keep DB calls low
+        if (processed > 0 && processed % 3 === 0) {
+            const { data: stopData } = await supabase
+                .from('pipeline_session_log')
+                .select('id')
+                .eq('session_id', sessionId)
+                .eq('message', '__STOP_REQUESTED__')
+                .limit(1);
+            if ((stopData?.length ?? 0) > 0) {
+                await log(`Session stopped by user after ${processed} leads`);
+                await flushLog();
+                await supabase.from('pipeline_session_log').insert({ session_id: sessionId, message: '__SESSION_COMPLETE__' });
+                return { processed, errors, debug, sessionId };
+            }
+        }
+
         listing.score = await scoreICP(listing);
         const emptyRooms: { roomType: string; imageUrl: string }[] = [];
 
@@ -1281,6 +1325,8 @@ export async function runPipelineSession(config: {
     }
     await log(`Session complete: ${processed} saved, ${emptyRoomsFound}/${minEmptyRooms} empty rooms found`);
     await flushLog();
+    // Write sentinel so UI knows session has ended
+    await supabase.from('pipeline_session_log').insert({ session_id: sessionId, message: '__SESSION_COMPLETE__' });
     return { processed, errors, debug, sessionId };
 }
 
