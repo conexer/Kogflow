@@ -17,7 +17,7 @@ import { downloadImage } from '@/lib/client-download';
 import { Sparkles, Download } from 'lucide-react';
 
 export default function GeneratePage() {
-    const { user, signOut } = useAuth();
+    const { user, signOut, loading: authLoading } = useAuth();
     console.log('GeneratePage v2 rendered'); // Force rebuild check
     const router = useRouter();
     const [image, setImage] = useState<File | null>(null);
@@ -31,6 +31,13 @@ export default function GeneratePage() {
     const [resultImage, setResultImage] = useState<string | null>(null);
     const [userProfile, setUserProfile] = useState<any>(null);
     const [aspectRatio, setAspectRatio] = useState<string | null>(null);
+
+    // Redirect unauthenticated users to signup
+    useEffect(() => {
+        if (!authLoading && !user) {
+            router.replace('/signup');
+        }
+    }, [user, authLoading, router]);
 
     useEffect(() => {
         async function loadProfile() {
@@ -180,19 +187,19 @@ export default function GeneratePage() {
                 throw new Error('No task ID returned');
             }
 
-            toast.success('Generation started! This usually takes ~15 seconds.');
+            toast.success('Generation started! This usually takes 3-8 minutes.');
 
             // Start Polling
-            const toastId = toast.loading('Designing your room...');
+            const toastId = toast.loading('Designing your room... (this can take a few minutes)');
 
             const poll = async () => {
-                // Safety timeout (e.g. 2 minutes)
+                // Safety timeout (10 minutes)
                 const startTime = Date.now();
 
                 while (true) {
-                    if (Date.now() - startTime > 120000) {
+                    if (Date.now() - startTime > 600000) {
                         toast.dismiss(toastId);
-                        throw new Error('Timed out waiting for server.');
+                        throw new Error('Timed out waiting for server. Please try again.');
                     }
 
                     const statusResult = await checkGenerationStatus(result.taskId, {
@@ -218,8 +225,14 @@ export default function GeneratePage() {
                         throw new Error(statusResult.error || 'Generation failed');
                     }
 
-                    // Wait 2 seconds before next poll
-                    await new Promise(r => setTimeout(r, 2000));
+                    // Update toast with elapsed time hint
+                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                    if (elapsed > 60) {
+                        toast.loading(`Still working... (${Math.floor(elapsed / 60)}m ${elapsed % 60}s)`, { id: toastId });
+                    }
+
+                    // Wait 5 seconds before next poll (task takes several minutes)
+                    await new Promise(r => setTimeout(r, 5000));
                 }
             };
 
@@ -478,7 +491,7 @@ export default function GeneratePage() {
             </main>
 
             <footer className="py-8 border-t border-border/40 text-center text-sm text-muted-foreground">
-                <p>© 2026 Kogflow. All rights reserved. (v1.2 - Async Polling)</p>
+                <p>© 2026 Kogflow. All rights reserved.</p>
             </footer>
 
             {/* Modal */}

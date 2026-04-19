@@ -1,20 +1,23 @@
 'use server';
 
 import { createClient } from '@supabase/supabase-js';
+import { deductCredit } from './credits';
+import { CREDIT_COST_VIDEO_IMAGE } from '@/lib/credit-costs';
 
 // --- Constants ---
-// App IDs for WAN 2.2 Image to Video
-const WAN22_APP_ID = '2034018763611316225';
-const SECONDARY_WAN22_APP_ID = '2034388379109957633';
-// runninghub.ai is currently the stable domain for our WAN 2.2 App ID
-const RUNNINGHUB_BASE = 'https://www.runninghub.ai';
+const ATLASCLOUD_BASE = 'https://api.atlascloud.ai';
+const ATLASCLOUD_MODEL = 'bytedance/seedance-v1-pro-fast/image-to-video';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const runningHubApiKey = process.env.RUNNINGHUB_API_KEY;
+const atlasApiKey = process.env.ATLASCLOUD_API_KEY;
+
+// Defaults
+const DEFAULT_RESOLUTION = '480p';
+const DEFAULT_DURATION = 4;
+const DEFAULT_ASPECT_RATIO = '16:9';
 
 interface VideoGenerationRequest {
-    imageUrls: string[];
     title: string;
     realtorInfo: {
         name: string;
@@ -24,137 +27,128 @@ interface VideoGenerationRequest {
     userId?: string;
     projectId?: string;
     aspectRatio?: '16:9' | '9:16';
+    status?: string;
+    imageUrls?: string[];
 }
 
-// Map aspect ratio string to WAN 2.2 node 260 select index
-// Values per official API docs: 1=Auto, 2=1:1, 3=4:3, 4=3:4, 5=16:9, 6=9:16
-function aspectRatioToIndex(ratio: '16:9' | '9:16' | undefined): string {
-    switch (ratio) {
-        case '16:9': return '5';
-        case '9:16': return '6';
-        default: return '1'; // Auto match
-    }
+const PROMPT = 'Create a realistic walkthrough video of this room. The camera moves at a normal walking pace with handheld, natural motion. Capture authentic, realistic camera movement with subtle micro-movements and slight variations. Show the room in full 3D with proper parallax and depth changes as the camera moves.';
+
+async function uploadImageToAtlas(sourceUrl: string): Promise<string> {
+    const imgRes = await fetch(sourceUrl);
+    if (!imgRes.ok) throw new Error(`Failed to fetch source image: ${imgRes.status}`);
+    const imgBuffer = await imgRes.arrayBuffer();
+    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+    const ext = contentType.includes('png') ? 'png' : 'jpg';
+
+    const form = new FormData();
+    form.append('file', new Blob([imgBuffer], { type: contentType }), `image.${ext}`);
+
+    const uploadRes = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/uploadMedia`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${atlasApiKey}` },
+        body: form
+    });
+    const uploadJson = await uploadRes.json();
+    const atlasUrl = uploadJson?.data?.download_url;
+    if (!atlasUrl) throw new Error(`AtlasCloud upload failed: ${JSON.stringify(uploadJson)}`);
+    return atlasUrl;
 }
 
 export async function generateVideo(data: VideoGenerationRequest) {
     console.log('🚀 generateVideo() called with:', data);
 
-    if (!runningHubApiKey) {
-        console.error('❌ Missing RunningHub API key!');
-        return { error: 'RunningHub API key not configured' };
+    if (!atlasApiKey) {
+        console.error('❌ Missing AtlasCloud API key!');
+        return { error: 'AtlasCloud API key not configured' };
     }
 
-    // Set to true to use mock api, false for real api
-    const MOCK_MODE = false;
+    const imageUrls = data.imageUrls || [];
+    if (imageUrls.length === 0) return { error: 'No image URLs provided' };
 
-    if (MOCK_MODE) {
-        console.log('🎬 Mock Video Generation:', {
-            images: data.imageUrls.length,
-            title: data.title,
-        });
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const taskIds = data.imageUrls.map((_, i) => `mock-video-${Date.now()}-${i}`);
-        return {
-            success: true,
-            taskIds,
-            results: data.imageUrls.map((url, i) => ({
-                imageUrl: url,
-                taskId: taskIds[i],
-                error: null
-            })),
-            isMock: true
-        };
+    // Deduct credits upfront: 10 credits per image in video
+    if (data.userId) {
+        const totalCost = imageUrls.length * CREDIT_COST_VIDEO_IMAGE;
+        const deduction = await deductCredit(data.userId, totalCost);
+        if (!deduction.success) {
+            return { error: `Insufficient credits. Need ${totalCost} credits (${imageUrls.length} images × 10 credits each).` };
+        }
+        console.log(`💳 Deducted ${totalCost} credits for ${imageUrls.length} images. Remaining: ${deduction.remaining}`);
     }
 
     try {
-        console.log('🎬 Starting WAN 2.2 Image-to-Video batch on RunningHub.ai...');
+        console.log('🎬 Starting Seedance v1 Pro Fast batch on AtlasCloud...');
         const taskIds: string[] = [];
         const errors: any[] = [];
         const results: { imageUrl: string; taskId: string | null; error: string | null }[] = [];
 
-        const ratioIndex = aspectRatioToIndex(data.aspectRatio);
-        const prompt = 'Have the camera slowly glide straight into the room.';
+        for (let i = 0; i < imageUrls.length; i++) {
+            const imageUrl = imageUrls[i];
+            console.log(`Processing image ${i + 1}/${imageUrls.length}: ${imageUrl}`);
 
-        for (let i = 0; i < data.imageUrls.length; i++) {
-            const imageUrl = data.imageUrls[i];
-            console.log(`Processing image ${i + 1}/${data.imageUrls.length}: ${imageUrl}`);
-
-            // Delay between requests to avoid rate limiting
             if (i > 0) {
                 console.log('⏳ Waiting 2 seconds before next request...');
                 await new Promise(resolve => setTimeout(resolve, 2000));
             }
 
-            const appIds = [WAN22_APP_ID, SECONDARY_WAN22_APP_ID];
-            let imageSuccess = false;
+            // Upload image to AtlasCloud storage first (required by their API)
+            let atlasImageUrl: string;
+            try {
+                atlasImageUrl = await uploadImageToAtlas(imageUrl);
+                console.log(`📤 Uploaded to AtlasCloud: ${atlasImageUrl}`);
+            } catch (uploadErr: any) {
+                console.error(`❌ Upload failed for ${imageUrl}:`, uploadErr.message);
+                results.push({ imageUrl, taskId: null, error: `Upload failed: ${uploadErr.message}` });
+                errors.push({ imageUrl, error: uploadErr.message });
+                continue;
+            }
 
-            for (let j = 0; j < appIds.length; j++) {
-                const currentAppId = appIds[j];
-                const isRetry = j > 0;
-                
-                if (isRetry) {
-                    console.log(`🔄 Retrying with secondary App ID: ${currentAppId}`);
-                }
+            const payload = {
+                model: ATLASCLOUD_MODEL,
+                image: atlasImageUrl,
+                prompt: PROMPT,
+                duration: DEFAULT_DURATION,
+                resolution: DEFAULT_RESOLUTION,
+                aspect_ratio: data.aspectRatio || DEFAULT_ASPECT_RATIO
+            };
 
-                const payload = {
-                    nodeInfoList: [
-                        { nodeId: '135', fieldName: 'image', fieldValue: imageUrl, description: 'Upload image' },
-                        { nodeId: '260', fieldName: 'select', fieldValue: ratioIndex, description: 'Aspect ratio' },
-                        { nodeId: '139', fieldName: 'index', fieldValue: '1', description: 'Prompt input method' },
-                        { nodeId: '116', fieldName: 'text', fieldValue: prompt, description: 'Creative description' }
-                    ],
-                    instanceType: 'default',
-                    usePersonalQueue: 'false'
-                };
+            const response = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/generateVideo`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${atlasApiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
 
-                const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/run/ai-app/${currentAppId}`, {
-                    method: 'POST',
-                    headers: {
-                        'Authorization': `Bearer ${runningHubApiKey}`,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(payload)
-                });
+            let result: any;
+            try {
+                result = await response.json();
+            } catch {
+                const text = await response.text();
+                console.error(`❌ Non-JSON response for image ${imageUrl}:`, text);
+                results.push({ imageUrl, taskId: null, error: `Parse error: ${text.slice(0, 200)}` });
+                errors.push({ imageUrl, error: 'Non-JSON response' });
+                continue;
+            }
 
-                let result: any;
-                try {
-                    result = await response.json();
-                } catch {
-                    const text = await response.text();
-                    console.error(`❌ Non-JSON response for image ${imageUrl} (App ${currentAppId}):`, text);
-                    if (!isRetry) continue; // Try fallback
-                    results.push({ imageUrl, taskId: null, error: `Parse error: ${text.slice(0, 200)}` });
-                    errors.push({ imageUrl, error: 'Non-JSON response' });
-                    break;
-                }
+            console.log(`📦 AtlasCloud response (image ${i + 1}):`, result);
 
-                console.log(`📦 WAN 2.2 response (image ${i + 1}, App ${j === 0 ? 'Primary' : 'Secondary'}):`, result);
+            if (!response.ok) {
+                const err = `HTTP ${response.status}: ${result?.error || result?.message || 'Unknown'}`;
+                console.error(`❌ HTTP Error for image ${imageUrl}:`, err);
+                results.push({ imageUrl, taskId: null, error: err });
+                errors.push({ imageUrl, error: err });
+                continue;
+            }
 
-                if (!response.ok || (result.errorCode && result.errorCode !== '0')) {
-                    const errorMsg = result.errorMessage || result.message || 'Unknown API error';
-                    console.error(`❌ Error ${result.errorCode || response.status} for image ${imageUrl} (App ${currentAppId}):`, errorMsg);
-                    
-                    if (!isRetry) {
-                        console.log('⚠️ Primary App failed, attempting fallback...');
-                        continue; // Try secondary App
-                    }
-
-                    results.push({ imageUrl, taskId: result.taskId || null, error: errorMsg });
-                    errors.push({ imageUrl, error: errorMsg });
-                    break;
-                }
-
-                if (result.taskId) {
-                    results.push({ imageUrl, taskId: result.taskId, error: null });
-                    taskIds.push(result.taskId);
-                    imageSuccess = true;
-                    break; // Success!
-                } else {
-                    if (!isRetry) continue;
-                    results.push({ imageUrl, taskId: null, error: 'No taskId returned' });
-                    errors.push({ imageUrl, error: 'No taskId returned' });
-                    break;
-                }
+            const predictionId = result?.data?.id;
+            if (predictionId) {
+                results.push({ imageUrl, taskId: predictionId, error: null });
+                taskIds.push(predictionId);
+            } else {
+                const errMsg = result?.error || result?.message || 'No prediction ID returned';
+                results.push({ imageUrl, taskId: null, error: errMsg });
+                errors.push({ imageUrl, error: errMsg });
             }
         }
 
@@ -173,29 +167,17 @@ export async function generateVideo(data: VideoGenerationRequest) {
 }
 
 export async function checkVideoStatus(taskId: string) {
-    if (!runningHubApiKey) {
+    if (!atlasApiKey) {
         return { error: 'API key not configured' };
     }
 
-    // Mock status
-    if (taskId.startsWith('mock-video-')) {
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        return {
-            status: 'success',
-            videoUrl: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-            message: 'Mock video ready'
-        };
-    }
-
     try {
-        // WAN 2.2 polling: POST /openapi/v2/query on runninghub.ai
-        const response = await fetch(`${RUNNINGHUB_BASE}/openapi/v2/query`, {
-            method: 'POST',
+        const response = await fetch(`${ATLASCLOUD_BASE}/api/v1/model/prediction/${taskId}`, {
+            method: 'GET',
             headers: {
-                'Authorization': `Bearer ${runningHubApiKey}`,
+                'Authorization': `Bearer ${atlasApiKey}`,
                 'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ taskId })
+            }
         });
 
         if (!response.ok) {
@@ -213,15 +195,12 @@ export async function checkVideoStatus(taskId: string) {
 }
 
 function parseStatusResult(result: any) {
-    const status = result.status;
-    const errorCode = result.errorCode;
+    const data = result?.data || result;
+    const status = data?.status;
 
-    if (status === 'SUCCESS' && result.results && result.results.length > 0) {
-        const results = result.results;
-        // WAN 2.2 returns results with fieldName='video_url' and the file at fileUrl
-        const videoResult = results.find((r: any) => r.fieldName === 'video_url') || results[0];
-        const videoUrl = videoResult?.fileUrl || videoResult?.url;
-
+    if (status === 'completed' || status === 'succeeded') {
+        const outputs = data?.outputs;
+        const videoUrl = Array.isArray(outputs) ? outputs[0] : outputs;
         return {
             status: 'success',
             videoUrl,
@@ -229,11 +208,10 @@ function parseStatusResult(result: any) {
         };
     }
 
-    if (status === 'FAILED' || (errorCode && errorCode !== '0')) {
+    if (status === 'failed') {
         return {
             status: 'failed',
-            error: result.errorMessage || result.failedReason?.exception_message || 'Generation failed',
-            errorCode: errorCode
+            error: data?.error || 'Generation failed'
         };
     }
 
@@ -296,6 +274,97 @@ export async function deleteVideo(videoId: number, videoUrl: string) {
         return { success: true };
     } catch (error: any) {
         console.error('Error deleting video:', error);
+        return { error: error.message };
+    }
+}
+
+// --- Queue Management Actions ---
+
+export async function enqueueVideoAction(data: {
+    userId: string;
+    projectId: string;
+    title: string;
+    imageUrls: string[];
+    realtorInfo: any;
+    aspectRatio: '16:9' | '9:16';
+}) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        const { count, error: countError } = await supabase
+            .from('videos')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', data.userId)
+            .in('status', ['queued', 'processing']);
+
+        if (countError) throw countError;
+        if ((count || 0) >= 5) {
+            return { error: 'Maximum of 5 videos allowed in queue. Please wait for current tasks to finish.' };
+        }
+
+        const { data: video, error } = await supabase
+            .from('videos')
+            .insert({
+                user_id: data.userId,
+                project_id: data.projectId,
+                video_url: '',
+                title: data.title,
+                image_count: data.imageUrls.length,
+                status: 'queued',
+                image_urls: data.imageUrls,
+                realtor_info: data.realtorInfo,
+                aspect_ratio: data.aspectRatio,
+                progress: 0
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+        return { success: true, videoId: video.id };
+    } catch (error: any) {
+        console.error('Enqueue error:', error);
+        return { error: error.message };
+    }
+}
+
+export async function updateVideoQueueStatus(videoId: number, updates: {
+    status?: 'queued' | 'processing' | 'completed' | 'failed' | 'cancelled';
+    progress?: number;
+    video_url?: string;
+    error?: string;
+    task_ids?: string[];
+}) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        const { error } = await supabase
+            .from('videos')
+            .update(updates)
+            .eq('id', videoId);
+
+        if (error) throw error;
+        return { success: true };
+    } catch (error: any) {
+        console.error('Update queue error:', error);
+        return { error: error.message };
+    }
+}
+
+export async function getQueuedVideos(userId: string) {
+    const supabase = createClient(supabaseUrl, supabaseKey);
+
+    try {
+        const { data, error } = await supabase
+            .from('videos')
+            .select('*')
+            .eq('user_id', userId)
+            .in('status', ['queued', 'processing'])
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+        return { success: true, videos: data };
+    } catch (error: any) {
+        console.error('Get queued videos error:', error);
         return { error: error.message };
     }
 }
