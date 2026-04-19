@@ -877,8 +877,8 @@ export default function OutreachPage() {
                                         Sessions per day
                                         <span className="text-primary font-bold">{sessionsPerDay} <span className="text-muted-foreground font-normal text-xs">≈ every {Math.round(24 / sessionsPerDay)}h</span></span>
                                     </label>
-                                    <input type="range" min={1} max={6} value={sessionsPerDay} onChange={e => setSessionsPerDay(Number(e.target.value))} className="w-full accent-primary" />
-                                    <div className="flex justify-between text-xs text-muted-foreground"><span>1/day</span><span>6/day (max, cron interval)</span></div>
+                                    <input type="range" min={1} max={10} value={sessionsPerDay} onChange={e => setSessionsPerDay(Number(e.target.value))} className="w-full accent-primary" />
+                                    <div className="flex justify-between text-xs text-muted-foreground"><span>1/day</span><span>10/day (max)</span></div>
                                 </div>
                                 <div className="space-y-2">
                                     <label className="text-sm font-medium flex items-center justify-between">
