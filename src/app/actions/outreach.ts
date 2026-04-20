@@ -624,27 +624,68 @@ export async function updateLeadStatus(id: string, status: string, updates?: any
     return { success: true };
 }
 
-// Submit a small batch of leads to Kie.ai (2-3 at a time to avoid timeouts)
+// Submit a batch to Kie.ai — empty rooms first, then high-score (≥35) furnished leads
 export async function submitStagingBatch(limit = 3): Promise<{ submitted: number; failed: number; errors: string[] }> {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    const { data, error } = await supabase
+    // Priority 1: leads with detected empty rooms
+    const { data: emptyData } = await supabase
         .from('outreach_leads')
-        .select('id, address, empty_rooms')
+        .select('id, address, empty_rooms, listing_url, icp_score')
         .eq('status', 'scraped')
         .not('empty_rooms', 'eq', '[]')
         .limit(limit);
 
-    if (error) return { submitted: 0, failed: 0, errors: [error.message] };
+    // Priority 2: high-score leads without empty rooms (will redesign any room)
+    const { data: highScoreData } = await supabase
+        .from('outreach_leads')
+        .select('id, address, empty_rooms, listing_url, icp_score')
+        .eq('status', 'scraped')
+        .eq('empty_rooms', '[]')
+        .gte('icp_score', 35)
+        .not('listing_url', 'is', null)
+        .order('icp_score', { ascending: false })
+        .limit(limit);
 
-    const pending = (data || []).filter((l: any) => Array.isArray(l.empty_rooms) && l.empty_rooms.length > 0);
+    const emptyLeads = (emptyData || []).filter((l: any) => Array.isArray(l.empty_rooms) && l.empty_rooms.length > 0);
+    const highScoreLeads = (highScoreData || []);
+
+    // Combine: empty rooms first, fill remaining slots with high-score
+    const allPending = [...emptyLeads, ...highScoreLeads].slice(0, limit);
+
     let submitted = 0;
     let failed = 0;
     const errors: string[] = [];
 
-    for (const lead of pending) {
-        const room = lead.empty_rooms[0];
-        const { taskId, error: stageErr } = await stageEmptyRoom(room.imageUrl, room.roomType || 'room');
+    for (const lead of allPending) {
+        const hasEmptyRoom = Array.isArray(lead.empty_rooms) && lead.empty_rooms.length > 0;
+        let imageUrl: string | null = null;
+        let roomType = 'room';
+        let redesign = false;
+
+        if (hasEmptyRoom) {
+            imageUrl = lead.empty_rooms[0].imageUrl;
+            roomType = lead.empty_rooms[0].roomType || 'room';
+            redesign = false;
+        } else {
+            // Fetch interior photo from HAR detail page
+            const photos = await getHarListingPhotos(lead.listing_url, 5);
+            const interiorPhoto = photos[1] || photos[0]; // skip exterior (index 0) if possible
+            if (!interiorPhoto) {
+                errors.push(`${lead.address}: no photos found`);
+                failed++;
+                continue;
+            }
+            imageUrl = interiorPhoto;
+            roomType = 'room';
+            redesign = true;
+            // Store in empty_rooms so the downstream poll/email pipeline works
+            await supabase.from('outreach_leads').update({
+                empty_rooms: [{ roomType, imageUrl, redesign: true }],
+            }).eq('id', lead.id);
+        }
+
+        const { taskId, error: stageErr } = await stageEmptyRoom(imageUrl!, roomType, redesign);
         if (taskId) {
             await updateLeadStatus(lead.id, 'staged', { staging_task_id: taskId });
             submitted++;
@@ -652,8 +693,7 @@ export async function submitStagingBatch(limit = 3): Promise<{ submitted: number
             failed++;
             errors.push(`${lead.address}: ${stageErr}`);
         }
-        // Small delay between submissions to avoid Kie.ai rate limiting
-        if (pending.indexOf(lead) < pending.length - 1) {
+        if (allPending.indexOf(lead) < allPending.length - 1) {
             await new Promise(r => setTimeout(r, 5000));
         }
     }
@@ -775,11 +815,13 @@ export async function getLeadStats(since?: string) {
 // 6. KIE.AI — Stage empty room
 // ─────────────────────────────────────────────
 
-export async function stageEmptyRoom(imageUrl: string, roomType: string): Promise<{ taskId?: string; error?: string }> {
+export async function stageEmptyRoom(imageUrl: string, roomType: string, redesign = false): Promise<{ taskId?: string; error?: string }> {
     if (!KIE_API_KEY) return { error: 'KIE_AI_API_KEY not configured' };
 
     try {
-        const prompt = `Add fully furnished ${roomType} decor in modern contemporary style. Keep all structural elements (walls, windows, floor, ceiling) identical. High quality, photorealistic real estate photography.`;
+        const prompt = redesign
+            ? `Professionally restage this ${roomType} with premium contemporary furniture and luxury real estate staging. Replace current furnishings with high-end modern pieces. Keep all structural elements (walls, windows, floor, ceiling, fixtures) completely identical. Magazine-quality, photorealistic real estate photography.`
+            : `Add fully furnished ${roomType} decor in modern contemporary style. Keep all structural elements (walls, windows, floor, ceiling) identical. High quality, photorealistic real estate photography.`;
 
         const res = await fetch('https://api.kie.ai/api/v1/jobs/createTask', {
             method: 'POST',
@@ -882,7 +924,7 @@ export async function sendOutreachEmail(lead: {
           <tr>
             <td align="center" style="padding:0 0 12px 0;">
               <p style="margin:0 0 6px 0;font-size:13px;color:#666;font-weight:600;text-transform:uppercase;letter-spacing:1px;">BEFORE</p>
-              ${lead.beforeImageUrl ? `<a href="${lead.beforeImageUrl}" target="_blank" style="display:block;"><img src="${lead.beforeImageUrl}" alt="Before - empty room" width="540" style="display:block;width:100%;max-width:540px;height:auto;border-radius:6px;border:1px solid #e5e7eb;" /></a>` : ''}
+              ${lead.beforeImageUrl ? `<a href="${lead.beforeImageUrl}" target="_blank" style="display:block;"><img src="${lead.beforeImageUrl}" alt="Before" width="540" style="display:block;width:100%;max-width:540px;height:auto;border-radius:6px;border:1px solid #e5e7eb;" /></a>` : ''}
             </td>
           </tr>
           <tr>
@@ -910,7 +952,7 @@ export async function sendOutreachEmail(lead: {
           <td style="padding:32px;">
             <p style="margin:0 0 16px;font-size:16px;color:#111827;">Hi ${lead.agentName || 'there'},</p>
             <p style="margin:0 0 16px;font-size:15px;color:#374151;line-height:1.6;">
-              I noticed your listing at <strong>${lead.address}</strong> and took the liberty of virtually staging one of the empty rooms as a free preview.
+              I noticed your listing at <strong>${lead.address}</strong> and created a free professional staging upgrade to show what it could look like with premium virtual staging.
             </p>
             ${imagesHtml}
             <p style="margin:16px 0;font-size:15px;color:#374151;line-height:1.6;">
@@ -1053,6 +1095,11 @@ export async function scanForEmptyRooms(limit = 3): Promise<{ scanned: number; f
 
         if (emptyRooms.length > 0) {
             await supabase.from('outreach_leads').update({ empty_rooms: emptyRooms }).eq('id', lead.id);
+            found++;
+        } else if ((lead.icp_score ?? 0) >= 35 && interiorPhotos[0]) {
+            // No empty room detected — but high ICP score, so queue any interior room for redesign staging
+            const roomEntry = { roomType: 'room', imageUrl: interiorPhotos[0], redesign: true };
+            await supabase.from('outreach_leads').update({ empty_rooms: [roomEntry] }).eq('id', lead.id);
             found++;
         }
     }
@@ -1235,7 +1282,9 @@ export async function runPipelineSession(config: {
     // Limit: 15 Moondream calls max to stay within time budget (~2 min)
     let emptyRoomsFound = 0;
     let moondreamChecked = 0;
+    let highScoreStaged = 0;
     const MAX_MOONDREAM = 15;
+    const MAX_HIGH_SCORE_STAGE = 5; // max redesigns per session to control Kie.ai credits
 
     // Sort toProcess so vacant/unfurnished keyword listings come first
     const vacancyKeywords = ['vacant', 'unfurnished', 'empty', 'needs staging', 'unoccupied', 'immediate occupancy', 'no furnit'];
@@ -1307,12 +1356,25 @@ export async function runPipelineSession(config: {
         if (!leadId) continue;
 
         if (emptyRooms.length > 0) {
-            const { taskId, error: stageErr } = await stageEmptyRoom(emptyRooms[0].imageUrl, emptyRooms[0].roomType);
+            const { taskId, error: stageErr } = await stageEmptyRoom(emptyRooms[0].imageUrl, emptyRooms[0].roomType, false);
             if (taskId) {
                 await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
-                await log(`  → Staged! taskId=${taskId}`);
+                await log(`  → Staged (empty room)! taskId=${taskId}`);
             } else {
-                await log(`  → Stage FAILED: ${stageErr} (imageUrl=${emptyRooms[0].imageUrl.slice(0, 80)})`);
+                await log(`  → Stage FAILED: ${stageErr}`);
+            }
+        } else if ((listing.score ?? 0) >= 35 && listing.photos[0] && highScoreStaged < MAX_HIGH_SCORE_STAGE) {
+            // High-score furnished lead — redesign any available room photo
+            highScoreStaged++;
+            const photoUrl = listing.photos[0];
+            const roomEntry = { roomType: 'room', imageUrl: photoUrl, redesign: true };
+            await supabase.from('outreach_leads').update({ empty_rooms: [roomEntry] }).eq('id', leadId);
+            const { taskId, error: stageErr } = await stageEmptyRoom(photoUrl, 'room', true);
+            if (taskId) {
+                await updateLeadStatus(leadId, 'staged', { staging_task_id: taskId });
+                await log(`  → Redesign staged (score ${listing.score})! taskId=${taskId}`);
+            } else {
+                await log(`  → Redesign FAILED: ${stageErr}`);
             }
         }
 

@@ -567,17 +567,17 @@ export default function OutreachPage() {
                             </div>
                             <div className="bg-card border border-border rounded-xl p-5 space-y-2">
                                 <div className="flex items-center justify-between">
-                                    <span className="text-sm text-muted-foreground">Empty Rooms Found</span>
+                                    <span className="text-sm text-muted-foreground">Staged Queue</span>
                                     <Zap className="w-4 h-4 text-violet-400" />
                                 </div>
                                 <div className="text-3xl font-bold">{stats.emptyRoomsFound ?? 0}</div>
-                                <div className="text-xs text-muted-foreground mb-1">leads ready to stage</div>
+                                <div className="text-xs text-muted-foreground mb-1">rooms ready (empty + score ≥35)</div>
                                 <div className="flex gap-2 flex-wrap">
                                     <button
                                         onClick={handleScanEmptyRooms}
                                         className="flex-1 text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors"
                                     >
-                                        Scan (3 leads)
+                                        Scan &amp; Prep (3)
                                     </button>
                                     <button
                                         onClick={handleSubmitBatch}
@@ -613,9 +613,10 @@ export default function OutreachPage() {
                         {/* ICP Scoring */}
                         <div className="bg-card border border-border rounded-xl p-6 space-y-4">
                             <h2 className="font-bold text-lg flex items-center gap-2"><Star className="w-5 h-5 text-amber-400" /> ICP Scoring System</h2>
+                            <p className="text-sm text-muted-foreground">Leads scoring <span className="text-violet-400 font-semibold">35+</span> are automatically staged and emailed — empty rooms get virtual furniture added, furnished rooms get a professional redesign.</p>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                 {[
-                                    { factor: 'Vacant / Unfurnished', points: '+40', reason: 'High visual need for staging' },
+                                    { factor: 'Vacant / Unfurnished', points: '+40', reason: 'High visual need — adds furniture to empty rooms' },
                                     { factor: 'Price Reduced', points: '+25', reason: 'Signals marketing failure' },
                                     { factor: 'Days on Market 60+', points: '+20', reason: 'High owner pressure' },
                                     { factor: 'Low Photo Count (<15)', points: '+10', reason: 'Tech-lagging indicator' },
