@@ -263,16 +263,47 @@ export default function OutreachNailPage() {
         }
     };
 
-    // Manual run — uses server action (no CRON_SECRET needed), fixed 20-profile budget
+    // Manual run — polls DB every 15s until a new run is logged (scrape takes 1-4 min)
     const handleManualRun = async () => {
         setRunning(true);
         setRunLog(['Starting manual scrape (20 profiles, sequential city rotation)...']);
         try {
             const result = await runNailPipelineManual();
             if (!result.accepted) throw new Error('No pipeline config found');
-            setRunLog(prev => [...prev, 'Pipeline started in background — refresh in ~60s to see results']);
-            toast.success('Pipeline started');
-            setTimeout(() => { loadData(); setRunning(false); }, 8000);
+            const startedAt = new Date().toISOString();
+            setRunLog(prev => [...prev, 'Scrape running in background — checking for results every 15s (takes 1–4 min)...']);
+
+            const POLL_INTERVAL = 15_000;
+            const TIMEOUT = 5 * 60_000;
+            const deadline = Date.now() + TIMEOUT;
+            let elapsed = 0;
+
+            const poll = async () => {
+                if (Date.now() > deadline) {
+                    setRunLog(prev => [...prev, 'Timed out waiting for results — check Recent Runs tab manually.']);
+                    setRunning(false);
+                    return;
+                }
+                elapsed += POLL_INTERVAL;
+                const recentRuns = await getNailRecentRuns(1);
+                const latestRun = recentRuns[0];
+                if (latestRun && latestRun.ran_at > startedAt) {
+                    const saved = latestRun.processed ?? 0;
+                    const city = latestRun.debug?.[1]?.match(/starting at "([^"]+)"/)?.[1] ?? '';
+                    setRunLog(prev => [
+                        ...prev,
+                        `Done — ${saved} new leads saved${city ? ` (${city})` : ''}`,
+                        ...(latestRun.debug ?? []).slice(2),
+                    ]);
+                    toast.success(`Scrape complete — ${saved} new leads`);
+                    await loadData();
+                    setRunning(false);
+                } else {
+                    setRunLog(prev => [...prev, `Still running... (${Math.round(elapsed / 1000)}s elapsed)`]);
+                    setTimeout(poll, POLL_INTERVAL);
+                }
+            };
+            setTimeout(poll, POLL_INTERVAL);
         } catch (e: any) {
             setRunLog(prev => [...prev, `Error: ${e.message}`]);
             toast.error(e.message);
