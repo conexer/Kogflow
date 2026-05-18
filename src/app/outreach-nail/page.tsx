@@ -15,6 +15,7 @@ import {
     loadNailPipelineConfig,
     saveNailPipelineConfig,
     exportNailLeadsCSV,
+    runNailPipelineManual,
 } from '@/app/actions/outreach-nail';
 import { toast } from 'sonner';
 
@@ -31,14 +32,27 @@ const SPECIALTY_COLORS: Record<string, string> = {
 };
 
 const DEFAULT_CITIES = [
+    // Top 25 metros — highest nail salon density
     'New York, NY', 'Los Angeles, CA', 'Chicago, IL', 'Houston, TX', 'Phoenix, AZ',
     'Philadelphia, PA', 'San Antonio, TX', 'San Diego, CA', 'Dallas, TX', 'San Jose, CA',
     'Austin, TX', 'Jacksonville, FL', 'Fort Worth, TX', 'Columbus, OH', 'Charlotte, NC',
     'Indianapolis, IN', 'San Francisco, CA', 'Seattle, WA', 'Denver, CO', 'Nashville, TN',
     'Oklahoma City, OK', 'El Paso, TX', 'Las Vegas, NV', 'Washington, DC', 'Miami, FL',
+    // Next 25
     'Atlanta, GA', 'Minneapolis, MN', 'Raleigh, NC', 'Tampa, FL', 'New Orleans, LA',
     'Portland, OR', 'Sacramento, CA', 'Kansas City, MO', 'Cincinnati, OH', 'Orlando, FL',
     'Riverside, CA', 'Cleveland, OH', 'Pittsburgh, PA', 'Baltimore, MD', 'Virginia Beach, VA',
+    'Tucson, AZ', 'Fresno, CA', 'Mesa, AZ', 'Albuquerque, NM', 'Long Beach, CA',
+    'Bakersfield, CA', 'Honolulu, HI', 'Anaheim, CA', 'Corpus Christi, TX', 'Lexington, KY',
+    // Next 25
+    'St. Louis, MO', 'St. Paul, MN', 'Stockton, CA', 'Henderson, NV', 'Greensboro, NC',
+    'Plano, TX', 'Newark, NJ', 'Toledo, OH', 'Chandler, AZ', 'Laredo, TX',
+    'Madison, WI', 'Durham, NC', 'Lubbock, TX', 'Garland, TX', 'Winston-Salem, NC',
+    'Scottsdale, AZ', 'Baton Rouge, LA', 'Norfolk, VA', 'Jersey City, NJ', 'Chesapeake, VA',
+    'Irvine, CA', 'Gilbert, AZ', 'Spokane, WA', 'Richmond, VA', 'Des Moines, IA',
+    // Final 10
+    'Boise, ID', 'Tacoma, WA', 'Salt Lake City, UT', 'Birmingham, AL', 'Rochester, NY',
+    'San Bernardino, CA', 'Fremont, CA', 'Fayetteville, NC', 'Little Rock, AR', 'Aurora, CO',
 ];
 
 const SETUP_SQL = `-- Run in Supabase SQL Editor or call /api/admin/nail-migrate with CRON_SECRET Bearer header
@@ -86,8 +100,10 @@ CREATE TABLE IF NOT EXISTS public.nail_pipeline_config (
   sessions_per_day INTEGER DEFAULT 4,
   scrapes_per_session INTEGER DEFAULT 10,
   cron_enabled BOOLEAN DEFAULT FALSE,
+  city_cursor INTEGER DEFAULT 0,
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE public.nail_pipeline_config ADD COLUMN IF NOT EXISTS city_cursor INTEGER DEFAULT 0;
 
 INSERT INTO public.nail_pipeline_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
@@ -247,26 +263,16 @@ export default function OutreachNailPage() {
         }
     };
 
-    // Manual run is independent of the slider params — uses a fixed budget (20 profiles)
+    // Manual run — uses server action (no CRON_SECRET needed), fixed 20-profile budget
     const handleManualRun = async () => {
         setRunning(true);
-        setRunLog(['Starting manual scrape run (independent of session sliders)...']);
+        setRunLog(['Starting manual scrape (20 profiles, sequential city rotation)...']);
         try {
-            const res = await fetch('/api/admin/run-nail-pipeline', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode: 'manual', adminEmail: user?.email }),
-            });
-            if (!res.ok) {
-                const err = await res.json();
-                throw new Error(err.error || `HTTP ${res.status}`);
-            }
-            const data = await res.json();
-            const summary = `Done — ${data.processed ?? 0} leads saved`;
-            setRunLog(prev => [...prev, summary, ...(data.debug ?? [])]);
-            toast.success(summary);
-            await loadData();
-            setRunning(false);
+            const result = await runNailPipelineManual();
+            if (!result.accepted) throw new Error('No pipeline config found');
+            setRunLog(prev => [...prev, 'Pipeline started in background — refresh in ~60s to see results']);
+            toast.success('Pipeline started');
+            setTimeout(() => { loadData(); setRunning(false); }, 8000);
         } catch (e: any) {
             setRunLog(prev => [...prev, `Error: ${e.message}`]);
             toast.error(e.message);

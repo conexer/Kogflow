@@ -107,6 +107,7 @@ export async function saveNailPipelineConfig(updates: {
     sessions_per_day?: number;
     scrapes_per_session?: number;
     cron_enabled?: boolean;
+    city_cursor?: number;
 }) {
     const supabase = createClient(supabaseUrl, supabaseKey);
     const { error } = await supabase.from('nail_pipeline_config')
@@ -432,33 +433,34 @@ export async function runNailPipelineSession({
     cities,
     scrapes,
     deadlineMs,
+    cursor = 0,
 }: {
     cities: string[];
     scrapes: number;
     deadlineMs: number;
-}): Promise<{ processed: number; errors: string[]; debug: string[] }> {
+    cursor?: number;
+}): Promise<{ processed: number; errors: string[]; debug: string[]; newCursor: number }> {
     const supabase = createClient(supabaseUrl, supabaseKey);
     const debug: string[] = [];
     const errors: string[] = [];
     let processed = 0;
     let totalScraped = 0;
 
-    // Prefer cities not scraped in the last 24h to maximize coverage
-    const { data: cityLog } = await supabase.from('nail_city_log').select('city, last_scraped_at');
-    const recentlyScraped = new Set(
-        (cityLog || [])
-            .filter(c => Date.now() - new Date(c.last_scraped_at).getTime() < 24 * 3600 * 1000)
-            .map(c => c.city)
-    );
+    // Sequential rotation: start from cursor, wrap around the end of the list
+    const startIdx = cities.length > 0 ? cursor % cities.length : 0;
+    const cityPool = [
+        ...cities.slice(startIdx),
+        ...cities.slice(0, startIdx),
+    ];
+    let citiesVisited = 0;
 
-    const eligible = cities.filter(c => !recentlyScraped.has(c));
-    const cityPool = (eligible.length > 0 ? eligible : cities).sort(() => Math.random() - 0.5);
-
-    debug.push(`Cities available: ${cityPool.length}, scrape budget: ${scrapes} profiles`);
+    debug.push(`City cursor: ${startIdx}/${cities.length}, starting at "${cityPool[0] ?? 'none'}", budget: ${scrapes} profiles`);
 
     for (const city of cityPool) {
         if (Date.now() > deadlineMs - 30_000) { debug.push('Deadline approaching — stopping'); break; }
         if (totalScraped >= scrapes) { debug.push('Scrape budget reached'); break; }
+
+        citiesVisited++;
 
         try {
             const profiles = await discoverVagaroProfilesInCity(city, debug);
@@ -508,7 +510,9 @@ export async function runNailPipelineSession({
         }
     }
 
-    return { processed, errors, debug };
+    const newCursor = cities.length > 0 ? (startIdx + citiesVisited) % cities.length : 0;
+    debug.push(`Next cursor: ${newCursor} ("${cities[newCursor] ?? 'wrap'}")`);
+    return { processed, errors, debug, newCursor };
 }
 
 // ─────────────────────────────────────────────
@@ -619,4 +623,37 @@ export async function exportNailLeadsCSV(): Promise<string> {
     ];
 
     return csvRows.join('\n');
+}
+
+// ─────────────────────────────────────────────
+// MANUAL RUN SERVER ACTION
+// Runs pipeline in background via after() — no CRON_SECRET needed from client
+// ─────────────────────────────────────────────
+
+import { after } from 'next/server';
+
+export async function runNailPipelineManual(): Promise<{ accepted: boolean }> {
+    const { config } = await loadNailPipelineConfig();
+    if (!config) return { accepted: false };
+
+    after(async () => {
+        const cursor = config.city_cursor ?? 0;
+        const result = await runNailPipelineSession({
+            cities: config.cities,
+            scrapes: 20,
+            deadlineMs: Date.now() + 240_000,
+            cursor,
+        });
+
+        await saveNailPipelineConfig({ city_cursor: result.newCursor });
+
+        await logNailRun({
+            processed: result.processed,
+            errors: result.errors,
+            debug: [`Manual run: budget=20, cursor=${cursor}→${result.newCursor}`, ...result.debug],
+            trigger: 'manual',
+        });
+    });
+
+    return { accepted: true };
 }

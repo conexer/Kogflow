@@ -3,6 +3,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import {
     loadNailPipelineConfig,
+    saveNailPipelineConfig,
     runNailPipelineSession,
     logNailRun,
     countTodayNailCronRuns,
@@ -40,17 +41,21 @@ export async function GET(request: Request) {
 
         const sessionBudget = Math.max(60_000, 270_000 - (Date.now() - start) - 10_000);
 
+        const cursor = config.city_cursor ?? 0;
         const result = await runNailPipelineSession({
             cities: config.cities,
             scrapes: config.scrapes_per_session,
             deadlineMs: Date.now() + sessionBudget,
+            cursor,
         });
+
+        await saveNailPipelineConfig({ city_cursor: result.newCursor });
 
         await logNailRun({
             processed: result.processed,
             errors: result.errors,
             debug: [
-                `Cron session ${todayRuns + 1}/${config.sessions_per_day}, budget=${config.scrapes_per_session} profiles`,
+                `Cron session ${todayRuns + 1}/${config.sessions_per_day}, budget=${config.scrapes_per_session}, cursor=${cursor}→${result.newCursor}`,
                 ...result.debug,
             ],
             trigger: 'cron',
