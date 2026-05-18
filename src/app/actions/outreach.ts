@@ -1840,8 +1840,8 @@ export async function stageEmptyRoom(imageUrl: string, roomType: string, redesig
     try {
         const sourceImageUrl = await uploadSourceImageForStaging(imageUrl);
         const prompt = redesign
-            ? `Restyle this ${roomType} for a real estate listing with tasteful modern furniture and decor. Preserve the room layout, walls, windows, floors, ceiling, and camera angle. Photorealistic MLS listing photo.`
-            : `Virtually stage this empty ${roomType} for a real estate listing with tasteful modern furniture and decor. Preserve the room layout, walls, windows, floors, ceiling, and camera angle. Photorealistic MLS listing photo.`;
+            ? `Professionally restage this ${roomType} with premium contemporary furniture and luxury real estate staging. Replace current furnishings with high-end modern pieces. Keep all structural elements (walls, windows, floor, ceiling, fixtures) completely identical. Magazine-quality, photorealistic real estate photography.`
+            : `Add fully furnished ${roomType} decor in modern contemporary style. Keep all structural elements (walls, windows, floor, ceiling) identical. High quality, photorealistic real estate photography.`;
 
         const res = await fetch('https://api.kie.ai/api/v1/jobs/createTask', {
             method: 'POST',
